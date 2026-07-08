@@ -173,6 +173,47 @@ jobs:
             cat "$HDR"
           fi
 
+      - name: Patch copy_to_iter const-qualifier mismatch (Linux 4.4)
+        run: |
+          set -e
+
+          # drivers/kernelsu/runtime/ksud_integration.c 里调用:
+          #   copy_to_iter(KERNEL_SU_RC + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to);
+          # 传入的是 const char*，但这颗 4.4 内核里 copy_to_iter 的签名是
+          #   size_t copy_to_iter(void *addr, size_t bytes, struct iov_iter *i);
+          # 第一个参数是不带 const 的 void*（较新内核后来改成了 const void*，
+          # KernelSU-Next 的代码是照新内核写的）。这里只是从这块内存读数据
+          # 拷贝出去，并不会写入，强转掉 const 是安全的，纯粹是新旧内核
+          # API 签名差异导致的类型不匹配。
+          FILE="drivers/kernelsu/runtime/ksud_integration.c"
+
+          if [ ! -f "$FILE" ]; then
+            echo "$FILE not found, skipping (directory layout may differ)."
+            exit 0
+          fi
+
+          if grep -q "(void \*)(KERNEL_SU_RC" "$FILE"; then
+            echo "Already patched, skipping."
+            exit 0
+          fi
+
+          if ! grep -q "copy_to_iter(KERNEL_SU_RC + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to);" "$FILE"; then
+            echo "[WARN] Expected call pattern not found in $FILE."
+            echo "       The actual source may differ; showing context around 'copy_to_iter' for manual review:"
+            grep -n "copy_to_iter" "$FILE" || true
+            exit 1
+          fi
+
+          echo "Before patch:"
+          grep -n "copy_to_iter" "$FILE"
+
+          sed -i \
+            's/copy_to_iter(KERNEL_SU_RC + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to);/copy_to_iter((void *)(KERNEL_SU_RC + ksu_rc_pos), ksu_rc_len - ksu_rc_pos, to);/' \
+            "$FILE"
+
+          echo "After patch:"
+          grep -n "copy_to_iter" "$FILE"
+
       - name: Setup Proton Clang
         run: |
           git clone \
