@@ -32,11 +32,15 @@ jobs:
             zip \
             cpio
 
-      - name: Setup KernelSU-Next
+      - name: Setup KernelSU-Next (non-GKI legacy mode)
         run: |
+          # 官方文档明确要求非 GKI 内核使用 "legacy" 参数集成：
+          # https://kernelsu-next.github.io/webpage/zh_CN/pages/how-to-integrate-for-non-gki.html
+          # 之前不带 -s legacy 走的是 GKI 向的默认集成方式，
+          # 这在 Linux 4.4 (msm8998/chiron) 上会引入不兼容的代码。
           curl -LSs \
           "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-          | bash -
+          | bash -s legacy
 
       - name: Check KernelSU files
         run: |
@@ -46,6 +50,176 @@ jobs:
           # 不再硬编码某一个文件名，动态找出所有 .h/.c 文件，
           # 后面统一在需要的文件里做兼容性判断
           echo "KernelSU source check complete."
+
+      - name: Manually integrate KernelSU-Next hooks (kernel < 4.14)
+        run: |
+          # 官方文档: kprobe 集成方式仅支持 4.14 及以上内核。
+          # msm8998/chiron 是 Linux 4.4，必须走手动集成：在
+          # fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c,
+          # kernel/reboot.c 五个文件里插入 KSU hook 调用。
+          #
+          # 脚本内嵌在 workflow 里（不依赖内核仓库里有额外文件），
+          # 基于官方给出的通用 diff 自动定位插入点。
+          #
+          # 注意：这类基于固定锚点字符串的补丁本质上是脆弱的——
+          # chiron 分支的实际代码上下文可能和官方示例有细微差异
+          # （变量名、参数顺序、内核内部 patch 等都可能不同）。
+          # 如果某个文件匹配失败，脚本会明确报错并列出需要
+          # 手动核对的文件，而不是静默跳过导致后面更难排查的报错。
+          cat > patch_ksu_legacy.py << 'PYEOF'
+          #!/usr/bin/env python3
+          import re
+          import sys
+          from pathlib import Path
+
+          ROOT = Path(".")
+
+          PATCHES = [
+              {
+                  "file": "fs/exec.c",
+                  "guard": "ksu_handle_execveat",
+                  "extern_anchor": r"^int do_execve\(struct filename \*filename,",
+                  "extern_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "__attribute__((hot))\n"
+                      "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n"
+                      "\t\t\t\tvoid *argv, void *envp, int *flags);\n"
+                      "#endif\n\n"
+                  ),
+                  "call_anchor": r"struct user_arg_ptr envp = \{ \.ptr\.native = __envp \};",
+                  "call_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n"
+                      "#endif\n"
+                  ),
+              },
+              {
+                  "file": "fs/open.c",
+                  "guard": "ksu_handle_faccessat",
+                  "extern_anchor": r"^SYSCALL_DEFINE3\(faccessat, int, dfd, const char __user \*, filename, int, mode\)",
+                  "extern_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "__attribute__((hot))\n"
+                      "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n"
+                      "\t\t\t\tint *mode, int *flags);\n"
+                      "#endif\n\n"
+                  ),
+                  "call_anchor": r"unsigned int lookup_flags = LOOKUP_FOLLOW;",
+                  "call_code": (
+                      "\n#ifdef CONFIG_KSU\n"
+                      "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+                      "#endif\n"
+                  ),
+              },
+              {
+                  "file": "fs/read_write.c",
+                  "guard": "ksu_handle_sys_read",
+                  "extern_anchor": r"^SYSCALL_DEFINE3\(read, unsigned int, fd, char __user \*, buf, size_t, count\)",
+                  "extern_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "extern bool ksu_vfs_read_hook __read_mostly;\n"
+                      "extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,\n"
+                      "\t\t\t\tchar __user **buf_ptr, size_t *count_ptr);\n"
+                      "#endif\n\n"
+                  ),
+                  "call_anchor": r"ssize_t ret = -EBADF;",
+                  "call_code": (
+                      "\n#ifdef CONFIG_KSU\n"
+                      "\tif (unlikely(ksu_vfs_read_hook))\n"
+                      "\t\tksu_handle_sys_read(fd, &buf, &count);\n"
+                      "#endif\n"
+                  ),
+              },
+              {
+                  "file": "fs/stat.c",
+                  "guard": "ksu_handle_stat",
+                  "extern_anchor": r"^SYSCALL_DEFINE4\(newfstatat, int, dfd, const char __user \*, filename,",
+                  "extern_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "__attribute__((hot))\n"
+                      "extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n"
+                      "\t\t\t\tint *flags);\n"
+                      "#endif\n\n"
+                  ),
+                  "call_anchor": r"struct kstat stat;",
+                  "call_code": (
+                      "\n#ifdef CONFIG_KSU\n"
+                      "\tksu_handle_stat(&dfd, &filename, &flag);\n"
+                      "#endif\n"
+                  ),
+              },
+              {
+                  "file": "kernel/reboot.c",
+                  "guard": "ksu_handle_sys_reboot",
+                  "extern_anchor": r"^SYSCALL_DEFINE4\(reboot, int, magic1, int, magic2, unsigned int, cmd,",
+                  "extern_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
+                      "#endif\n\n"
+                  ),
+                  "call_anchor": r"int ret = 0;",
+                  "call_code": (
+                      "\n#ifdef CONFIG_KSU\n"
+                      "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
+                      "#endif\n"
+                  ),
+              },
+          ]
+
+          failures = []
+
+          for p in PATCHES:
+              path = ROOT / p["file"]
+              if not path.exists():
+                  failures.append(f"[MISSING FILE] {p['file']} 不存在，请确认内核源码路径是否正确")
+                  continue
+
+              text = path.read_text()
+
+              if p["guard"] in text:
+                  print(f"[SKIP] {p['file']} 已经包含 '{p['guard']}'，视为已打过补丁")
+                  continue
+
+              extern_re = re.compile(p["extern_anchor"], re.MULTILINE)
+              m = extern_re.search(text)
+              if not m:
+                  failures.append(
+                      f"[NO MATCH] {p['file']}: 找不到 extern 插入点 (正则: {p['extern_anchor']})\n"
+                      f"           需要手动核对该文件里对应函数的实际签名。"
+                  )
+                  continue
+              text = text[: m.start()] + p["extern_code"] + text[m.start():]
+
+              call_re = re.compile(p["call_anchor"], re.MULTILINE)
+              matches = list(call_re.finditer(text))
+              if not matches:
+                  failures.append(
+                      f"[NO MATCH] {p['file']}: 找不到 hook 调用插入点 (正则: {p['call_anchor']})\n"
+                      f"           extern 声明已插入，但函数体内的调用点没找到，需要手动核对。"
+                  )
+                  path.write_text(text)
+                  continue
+
+              offset = 0
+              for mm in matches:
+                  insert_pos = mm.end() + offset
+                  insertion = "\n" + p["call_code"]
+                  text = text[:insert_pos] + insertion + text[insert_pos:]
+                  offset += len(insertion)
+
+              path.write_text(text)
+              print(f"[OK] {p['file']} 已完成补丁 ({len(matches)} 处调用插入)")
+
+          if failures:
+              print("\n===== 以下文件需要手动处理 =====")
+              for f in failures:
+                  print(f)
+              sys.exit(1)
+
+          print("\n全部补丁应用成功。")
+          PYEOF
+
+          python3 patch_ksu_legacy.py
 
       - name: Patch syscall_fn_t for Linux 4.4 (compat shim)
         run: |
@@ -83,6 +257,43 @@ jobs:
             echo "After patch (head):"
             head -30 "$FILE"
           done
+
+      - name: Add compiler_types.h compat shim for old kernel (Linux 4.4)
+        run: |
+          set -e
+
+          # msm8998 (chiron) 使用的是 Linux 4.4，而 include/linux/compiler_types.h
+          # 是内核 4.11+ 才从 compiler.h 里拆分出来的独立头文件，4.4 树里根本
+          # 不存在这个文件。KernelSU-Next v3.3.0 新增的 feature/sulog.c 是按
+          # 现代内核写的，直接 #include <linux/compiler_types.h>，导致
+          # "file not found"。
+          #
+          # 这里补一个兼容 shim：如果文件不存在就创建一个转发到 compiler.h
+          # 的空壳，4.4 内核的 compiler.h 已经提供了大部分必需的宏
+          # (likely/unlikely、属性宏等)，足够满足 sulog.c 的需求。
+          HDR="include/linux/compiler_types.h"
+
+          if [ -f "$HDR" ]; then
+            echo "$HDR already exists, no shim needed."
+          else
+            echo "Creating compat shim at $HDR"
+            cat > "$HDR" << 'EOF'
+          #ifndef _LINUX_COMPILER_TYPES_H
+          #define _LINUX_COMPILER_TYPES_H
+
+          /*
+           * Compatibility shim for kernels older than 4.11 that don't ship
+           * include/linux/compiler_types.h. Newer code (e.g. KernelSU-Next)
+           * expects this header to exist; on old trees the equivalent macros
+           * live in compiler.h, so just forward to it.
+           */
+          #include <linux/compiler.h>
+
+          #endif /* _LINUX_COMPILER_TYPES_H */
+          EOF
+            echo "Shim created:"
+            cat "$HDR"
+          fi
 
       - name: Setup Proton Clang
         run: |
