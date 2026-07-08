@@ -51,176 +51,6 @@ jobs:
           # 后面统一在需要的文件里做兼容性判断
           echo "KernelSU source check complete."
 
-      - name: Manually integrate KernelSU-Next hooks (kernel < 4.14)
-        run: |
-          # 官方文档: kprobe 集成方式仅支持 4.14 及以上内核。
-          # msm8998/chiron 是 Linux 4.4，必须走手动集成：在
-          # fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c,
-          # kernel/reboot.c 五个文件里插入 KSU hook 调用。
-          #
-          # 脚本内嵌在 workflow 里（不依赖内核仓库里有额外文件），
-          # 基于官方给出的通用 diff 自动定位插入点。
-          #
-          # 注意：这类基于固定锚点字符串的补丁本质上是脆弱的——
-          # chiron 分支的实际代码上下文可能和官方示例有细微差异
-          # （变量名、参数顺序、内核内部 patch 等都可能不同）。
-          # 如果某个文件匹配失败，脚本会明确报错并列出需要
-          # 手动核对的文件，而不是静默跳过导致后面更难排查的报错。
-          cat > patch_ksu_legacy.py << 'PYEOF'
-          #!/usr/bin/env python3
-          import re
-          import sys
-          from pathlib import Path
-
-          ROOT = Path(".")
-
-          PATCHES = [
-              {
-                  "file": "fs/exec.c",
-                  "guard": "ksu_handle_execveat",
-                  "extern_anchor": r"^int do_execve\(struct filename \*filename,",
-                  "extern_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "__attribute__((hot))\n"
-                      "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n"
-                      "\t\t\t\tvoid *argv, void *envp, int *flags);\n"
-                      "#endif\n\n"
-                  ),
-                  "call_anchor": r"struct user_arg_ptr envp = \{ \.ptr\.native = __envp \};",
-                  "call_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n"
-                      "#endif\n"
-                  ),
-              },
-              {
-                  "file": "fs/open.c",
-                  "guard": "ksu_handle_faccessat",
-                  "extern_anchor": r"^SYSCALL_DEFINE3\(faccessat, int, dfd, const char __user \*, filename, int, mode\)",
-                  "extern_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "__attribute__((hot))\n"
-                      "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n"
-                      "\t\t\t\tint *mode, int *flags);\n"
-                      "#endif\n\n"
-                  ),
-                  "call_anchor": r"unsigned int lookup_flags = LOOKUP_FOLLOW;",
-                  "call_code": (
-                      "\n#ifdef CONFIG_KSU\n"
-                      "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
-                      "#endif\n"
-                  ),
-              },
-              {
-                  "file": "fs/read_write.c",
-                  "guard": "ksu_handle_sys_read",
-                  "extern_anchor": r"^SYSCALL_DEFINE3\(read, unsigned int, fd, char __user \*, buf, size_t, count\)",
-                  "extern_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "extern bool ksu_vfs_read_hook __read_mostly;\n"
-                      "extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,\n"
-                      "\t\t\t\tchar __user **buf_ptr, size_t *count_ptr);\n"
-                      "#endif\n\n"
-                  ),
-                  "call_anchor": r"ssize_t ret = -EBADF;",
-                  "call_code": (
-                      "\n#ifdef CONFIG_KSU\n"
-                      "\tif (unlikely(ksu_vfs_read_hook))\n"
-                      "\t\tksu_handle_sys_read(fd, &buf, &count);\n"
-                      "#endif\n"
-                  ),
-              },
-              {
-                  "file": "fs/stat.c",
-                  "guard": "ksu_handle_stat",
-                  "extern_anchor": r"^SYSCALL_DEFINE4\(newfstatat, int, dfd, const char __user \*, filename,",
-                  "extern_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "__attribute__((hot))\n"
-                      "extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n"
-                      "\t\t\t\tint *flags);\n"
-                      "#endif\n\n"
-                  ),
-                  "call_anchor": r"struct kstat stat;",
-                  "call_code": (
-                      "\n#ifdef CONFIG_KSU\n"
-                      "\tksu_handle_stat(&dfd, &filename, &flag);\n"
-                      "#endif\n"
-                  ),
-              },
-              {
-                  "file": "kernel/reboot.c",
-                  "guard": "ksu_handle_sys_reboot",
-                  "extern_anchor": r"^SYSCALL_DEFINE4\(reboot, int, magic1, int, magic2, unsigned int, cmd,",
-                  "extern_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
-                      "#endif\n\n"
-                  ),
-                  "call_anchor": r"int ret = 0;",
-                  "call_code": (
-                      "\n#ifdef CONFIG_KSU\n"
-                      "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
-                      "#endif\n"
-                  ),
-              },
-          ]
-
-          failures = []
-
-          for p in PATCHES:
-              path = ROOT / p["file"]
-              if not path.exists():
-                  failures.append(f"[MISSING FILE] {p['file']} 不存在，请确认内核源码路径是否正确")
-                  continue
-
-              text = path.read_text()
-
-              if p["guard"] in text:
-                  print(f"[SKIP] {p['file']} 已经包含 '{p['guard']}'，视为已打过补丁")
-                  continue
-
-              extern_re = re.compile(p["extern_anchor"], re.MULTILINE)
-              m = extern_re.search(text)
-              if not m:
-                  failures.append(
-                      f"[NO MATCH] {p['file']}: 找不到 extern 插入点 (正则: {p['extern_anchor']})\n"
-                      f"           需要手动核对该文件里对应函数的实际签名。"
-                  )
-                  continue
-              text = text[: m.start()] + p["extern_code"] + text[m.start():]
-
-              call_re = re.compile(p["call_anchor"], re.MULTILINE)
-              matches = list(call_re.finditer(text))
-              if not matches:
-                  failures.append(
-                      f"[NO MATCH] {p['file']}: 找不到 hook 调用插入点 (正则: {p['call_anchor']})\n"
-                      f"           extern 声明已插入，但函数体内的调用点没找到，需要手动核对。"
-                  )
-                  path.write_text(text)
-                  continue
-
-              offset = 0
-              for mm in matches:
-                  insert_pos = mm.end() + offset
-                  insertion = "\n" + p["call_code"]
-                  text = text[:insert_pos] + insertion + text[insert_pos:]
-                  offset += len(insertion)
-
-              path.write_text(text)
-              print(f"[OK] {p['file']} 已完成补丁 ({len(matches)} 处调用插入)")
-
-          if failures:
-              print("\n===== 以下文件需要手动处理 =====")
-              for f in failures:
-                  print(f)
-              sys.exit(1)
-
-          print("\n全部补丁应用成功。")
-          PYEOF
-
-          python3 patch_ksu_legacy.py
-
       - name: Patch syscall_fn_t for Linux 4.4 (compat shim)
         run: |
           set -e
@@ -313,15 +143,25 @@ jobs:
           # Xiaomi MIX2 chiron
           make O=out chiron_defconfig
 
+          # KernelSU-Next 在非 GKI 内核上优先使用 kprobe 方式做 hook
+          # （而不是手动改内核源码）。上一次构建日志显示它已经自动
+          # 选择了 "Hook mode: Kprobes" 并 patch 了 fs/namespace.c、
+          # selinux 相关文件，说明这条路径本身是可行的。
+          # 这里显式打开官方文档要求的三个配置项，避免因为 defconfig
+          # 里没有这些项而被静默降级或跳过：
+          # https://kernelsu-next.github.io/webpage/zh_CN/pages/how-to-integrate-for-non-gki.html
           scripts/config \
           --file out/.config \
-          --enable CONFIG_KSU
+          --enable CONFIG_KSU \
+          --enable CONFIG_KPROBES \
+          --enable CONFIG_KPROBE_EVENTS \
+          --enable CONFIG_KSU_KPROBE_HOOKS
 
           make O=out olddefconfig
 
       - name: Check KernelSU config
         run: |
-          grep CONFIG_KSU out/.config || true
+          grep -E "CONFIG_KSU|CONFIG_KPROBE" out/.config || true
 
       - name: Build Kernel
         run: |
