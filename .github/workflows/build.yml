@@ -1,8 +1,7 @@
 name: Build Xiaomi MIX2 MSM8998 KernelSU-Next
 
-on:
+'on':
   workflow_dispatch:
-
 
 jobs:
 
