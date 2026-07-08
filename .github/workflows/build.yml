@@ -34,13 +34,61 @@ jobs:
 
       - name: Setup KernelSU-Next (non-GKI legacy mode)
         run: |
+          set -e
+
           # 官方文档明确要求非 GKI 内核使用 "legacy" 参数集成：
           # https://kernelsu-next.github.io/webpage/zh_CN/pages/how-to-integrate-for-non-gki.html
           # 之前不带 -s legacy 走的是 GKI 向的默认集成方式，
           # 这在 Linux 4.4 (msm8998/chiron) 上会引入不兼容的代码。
-          curl -LSs \
-          "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-          | bash -s legacy
+          #
+          # 之前直接 curl | bash 出过问题：GitHub 对 raw.githubusercontent.com
+          # 偶尔会返回限流/反爬虫的错误页面而不是脚本内容，curl 不加 -f
+          # 时不会因为 HTTP 错误状态码而失败，导致这段错误页面文本被当成
+          # bash 脚本执行，报一堆语法错误。
+          #
+          # 这里改成: 下载到文件 -> 校验看起来像正常脚本(而不是HTML/限流提示)
+          # -> 失败自动重试几次 -> 校验通过再执行。
+          URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
+          OUT="setup_ksu.sh"
+
+          MAX_RETRIES=5
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i/$MAX_RETRIES: downloading setup.sh"
+
+            if curl -fLSs --retry 3 --retry-delay 2 -o "$OUT" "$URL"; then
+              # 简单校验: 正常脚本应该以 shebang 或 shell 常见语句开头，
+              # 不应该包含 GitHub 限流/反爬虫页面的特征字符串。
+              if grep -qi "rate limit\|scraping\|<html\|<!DOCTYPE" "$OUT"; then
+                echo "Downloaded content looks like an error page, not a script. Retrying..."
+                cat "$OUT"
+                sleep $((i * 3))
+                continue
+              fi
+
+              if [ ! -s "$OUT" ]; then
+                echo "Downloaded file is empty. Retrying..."
+                sleep $((i * 3))
+                continue
+              fi
+
+              echo "Download looks valid, proceeding."
+              break
+            else
+              echo "curl failed (HTTP error or network issue). Retrying..."
+              sleep $((i * 3))
+            fi
+
+            if [ "$i" -eq "$MAX_RETRIES" ]; then
+              echo "Failed to download a valid setup.sh after $MAX_RETRIES attempts."
+              exit 1
+            fi
+          done
+
+          echo "----- setup.sh head (sanity check) -----"
+          head -20 "$OUT"
+          echo "-----------------------------------------"
+
+          bash "$OUT" legacy
 
       - name: Check KernelSU files
         run: |
