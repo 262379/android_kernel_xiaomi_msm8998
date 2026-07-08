@@ -1,9 +1,11 @@
-name: Build Xiaomi MIX2 MSM8998 KernelSU
+name: Build Xiaomi MIX2 MSM8998 KernelSU-Next
 
 on:
   workflow_dispatch:
 
+
 jobs:
+
   build:
 
     runs-on: ubuntu-22.04
@@ -11,13 +13,14 @@ jobs:
 
     steps:
 
-    - name: Checkout
+    - name: Checkout Kernel Source
       uses: actions/checkout@v4
 
 
 
     - name: Install dependencies
       run: |
+
         sudo apt update
 
         sudo apt install -y \
@@ -33,40 +36,45 @@ jobs:
           curl \
           python3 \
           unzip \
-          zip
+          zip \
+          cpio
 
 
 
     - name: Setup KernelSU-Next
       run: |
+
         curl -LSs \
         "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
         | bash -
 
 
 
-    # 修复 MSM8998 4.4 syscall_fn_t 缺失
-    - name: Fix KernelSU syscall_fn_t
+    # 修复 Linux 4.4 msm8998 syscall_fn_t 缺失
+    - name: Patch KernelSU syscall_fn_t
       run: |
 
-        echo "Fix syscall_fn_t"
+        FILE="drivers/kernelsu/hook/syscall_hook.h"
 
-        grep -R "syscall_fn_t" -n drivers/kernelsu || true
+
+        echo "Before patch:"
+        head -30 $FILE
 
 
         sed -i '/#include/a\
 #ifndef syscall_fn_t\
-typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);\
+typedef long (*syscall_fn_t)(const struct pt_regs *);\
 #endif' \
-        drivers/kernelsu/hook/syscall_hook.h
+        $FILE
 
 
-        grep -n "syscall_fn_t" \
-        drivers/kernelsu/hook/syscall_hook.h
+        echo "After patch:"
+        head -40 $FILE
 
 
 
-    - name: Setup clang
+
+    - name: Setup Proton Clang
       run: |
 
         git clone --depth=1 \
@@ -76,7 +84,7 @@ typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);\
 
 
 
-    - name: Configure kernel
+    - name: Configure Kernel
       run: |
 
         export ARCH=arm64
@@ -86,9 +94,11 @@ typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);\
         mkdir out
 
 
+        # Xiaomi MIX2
         make O=out chiron_defconfig
 
 
+        # Enable KernelSU
         scripts/config \
         --file out/.config \
         --enable CONFIG_KSU
@@ -98,8 +108,15 @@ typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);\
 
 
 
+    - name: Check KernelSU Config
+      run: |
 
-    - name: Build kernel
+        grep KSU out/.config || true
+
+
+
+
+    - name: Build Kernel
       run: |
 
         export ARCH=arm64
@@ -120,7 +137,15 @@ typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);\
 
 
 
-    - name: Prepare AnyKernel3
+    - name: Check Image
+      run: |
+
+        ls -lh out/arch/arm64/boot/
+
+
+
+
+    - name: Build AnyKernel3 ZIP
       run: |
 
         git clone --depth=1 \
@@ -148,10 +173,11 @@ typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);\
 
 
 
-    - name: Upload
+    - name: Upload KernelSU ZIP
       uses: actions/upload-artifact@v4
 
       with:
+
         name: KernelSU-MIX2-chiron
 
         path: KernelSU-MIX2-chiron.zip
