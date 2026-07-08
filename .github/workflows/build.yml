@@ -12,7 +12,7 @@ jobs:
 
     steps:
 
-    - name: Checkout source
+    - name: Checkout
       uses: actions/checkout@v4
 
 
@@ -34,8 +34,7 @@ jobs:
           curl \
           python3 \
           unzip \
-          zip \
-          cpio
+          zip
 
 
 
@@ -47,12 +46,34 @@ jobs:
 
 
 
-    - name: Download Proton Clang
+    # 修复 MSM8998 4.4 syscall_fn_t 缺失
+    - name: Fix KernelSU syscall_fn_t
+      run: |
+
+        echo "Fix syscall_fn_t"
+
+        grep -R "syscall_fn_t" -n drivers/kernelsu || true
+
+
+        sed -i '/#include/a\
+#ifndef syscall_fn_t\
+typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);\
+#endif' \
+        drivers/kernelsu/hook/syscall_hook.h
+
+
+        grep -n "syscall_fn_t" \
+        drivers/kernelsu/hook/syscall_hook.h
+
+
+
+    - name: Setup clang
       run: |
 
         git clone --depth=1 \
         https://github.com/kdrag0n/proton-clang \
         clang
+
 
 
 
@@ -62,20 +83,20 @@ jobs:
         export ARCH=arm64
         export SUBARCH=arm64
 
+
         mkdir out
 
 
-        # Xiaomi MIX2 chiron
         make O=out chiron_defconfig
 
 
-        # Enable KernelSU
         scripts/config \
         --file out/.config \
         --enable CONFIG_KSU
 
 
         make O=out olddefconfig
+
 
 
 
@@ -95,16 +116,7 @@ jobs:
           CC=clang \
           CROSS_COMPILE=aarch64-linux-gnu- \
           CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          LLVM=1 \
-          LLVM_IAS=1 \
           -j$(nproc)
-
-
-
-    - name: Check kernel output
-      run: |
-
-        ls -lh out/arch/arm64/boot/
 
 
 
@@ -137,11 +149,10 @@ jobs:
 
 
 
-    - name: Upload KernelSU ZIP
+    - name: Upload
       uses: actions/upload-artifact@v4
 
       with:
-
         name: KernelSU-MIX2-chiron
 
         path: KernelSU-MIX2-chiron.zip
