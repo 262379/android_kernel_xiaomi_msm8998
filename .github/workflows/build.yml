@@ -3,22 +3,17 @@ name: Build Xiaomi MIX2 MSM8998 KernelSU-Next
 'on':
   workflow_dispatch:
 
-
 jobs:
   build:
     runs-on: ubuntu-22.04
 
-
     steps:
-
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
-
 
       - name: Install dependencies
         run: |
           sudo apt update
-
           sudo apt install -y \
             bc \
             bison \
@@ -29,71 +24,154 @@ jobs:
             gcc-arm-linux-gnueabihf \
             libssl-dev \
             libelf-dev \
+            libncurses-dev \
+            device-tree-compiler \
             curl \
             python3 \
             unzip \
             zip \
             cpio
 
-
       - name: Setup KernelSU-Next
         run: |
-
           curl -LSs \
           "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
           | bash -
 
-
       - name: Check KernelSU files
         run: |
+          echo "Listing drivers/kernelsu recursively:"
+          find drivers/kernelsu -type f
 
-          ls -la drivers/kernelsu
+          # 不再硬编码某一个文件名，动态找出所有 .h/.c 文件，
+          # 后面统一在需要的文件里做兼容性判断
+          echo "KernelSU source check complete."
 
-          test -f drivers/kernelsu/hook/syscall_hook.h
-
-
-      - name: Patch syscall_fn_t for Linux 4.4
+      - name: Patch syscall_fn_t for Linux 4.4 (compat shim)
         run: |
+          set -e
 
-          FILE="drivers/kernelsu/hook/syscall_hook.h"
+          # 动态定位可能需要 syscall_fn_t 的文件，而不是假设固定路径。
+          # KernelSU-Next 的目录结构会随版本变化，硬编码路径容易在
+          # 分支更新后直接导致 job 失败。
+          TARGET_FILES=$(grep -rl "syscall_fn_t" drivers/kernelsu || true)
 
+          if [ -z "$TARGET_FILES" ]; then
+            echo "No files reference syscall_fn_t, nothing to patch."
+            exit 0
+          fi
 
-          echo "Before patch:"
-          head -40 $FILE
+          for FILE in $TARGET_FILES; do
+            echo "Checking $FILE"
 
+            # 如果这个文件里已经有我们的 compat guard 或者内核头本身
+            # 已经定义了 syscall_fn_t 类型，就跳过，避免重复插入
+            # 或者与已有定义冲突（#ifndef 对 typedef 无效，必须用
+            # 自定义宏做 guard）。
+            if grep -q "__KSU_SYSCALL_FN_T_COMPAT" "$FILE"; then
+              echo "  already patched, skipping"
+              continue
+            fi
 
-          sed -i '/#include/a\
-#ifndef syscall_fn_t\
-typedef long (*syscall_fn_t)(const struct pt_regs *);\
-#endif' \
-          $FILE
+            echo "Before patch (head):"
+            head -20 "$FILE"
 
+            # 只在文件最顶部插入一次，用独立宏 guard，
+            # 不依赖 typedef 本身作为 ifndef 条件。
+            sed -i '1i #ifndef __KSU_SYSCALL_FN_T_COMPAT\n#define __KSU_SYSCALL_FN_T_COMPAT\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n#endif' "$FILE"
 
-          echo "After patch:"
-          head -50 $FILE
-
-
+            echo "After patch (head):"
+            head -30 "$FILE"
+          done
 
       - name: Setup Proton Clang
         run: |
-
           git clone \
           --depth=1 \
           --single-branch \
           https://github.com/kdrag0n/proton-clang \
           clang
 
-
-
       - name: Configure Kernel
         run: |
-
           export ARCH=arm64
           export SUBARCH=arm64
 
-
           mkdir -p out
 
-
           # Xiaomi MIX2 chiron
-          make O=out chiron
+          make O=out chiron_defconfig
+
+          scripts/config \
+          --file out/.config \
+          --enable CONFIG_KSU
+
+          make O=out olddefconfig
+
+      - name: Check KernelSU config
+        run: |
+          grep CONFIG_KSU out/.config || true
+
+      - name: Build Kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            -j"$(nproc)"
+
+      - name: Check Kernel Output
+        run: |
+          find out/arch/arm64/boot -type f
+
+      - name: Build AnyKernel3
+        run: |
+          git clone \
+          --depth=1 \
+          https://github.com/osm0sis/AnyKernel3 \
+          AnyKernel3
+
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp \
+            out/arch/arm64/boot/Image.gz-dtb \
+            AnyKernel3/
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp \
+            out/arch/arm64/boot/Image.gz \
+            AnyKernel3/
+          else
+            echo "Kernel image not found!"
+            exit 1
+          fi
+
+          cd AnyKernel3
+
+          sed -i \
+          's/kernel.string=.*/kernel.string=MIX2 MSM8998 KernelSU-Next/' \
+          anykernel.sh
+
+          # 明确指定机型代号，避免模板里残留其他机型信息
+          # 导致刷机时被 anykernel.sh 的设备校验拦截。
+          sed -i 's/device.name1=.*/device.name1=chiron/' anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=/' anykernel.sh
+          sed -i 's/device.name3=.*/device.name3=/' anykernel.sh
+          sed -i 's/device.name4=.*/device.name4=/' anykernel.sh
+          sed -i 's/device.name5=.*/device.name5=/' anykernel.sh
+
+          zip -r9 \
+          ../KernelSU-MIX2-chiron.zip \
+          .
+
+      - name: Upload Kernel ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: KernelSU-MIX2-chiron
+          path: KernelSU-MIX2-chiron.zip
