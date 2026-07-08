@@ -1,0 +1,92 @@
+name: Build Xiaomi MIX2 MSM8998 KernelSU
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+
+    - name: Checkout
+      uses: actions/checkout@v4
+
+
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          bc \
+          bison \
+          flex \
+          build-essential \
+          gcc-aarch64-linux-gnu \
+          libssl-dev \
+          libelf-dev \
+          curl \
+          python3 \
+          unzip \
+          zip
+
+
+    - name: Setup KernelSU-Next
+      run: |
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+
+
+    - name: Download clang
+      run: |
+        git clone --depth=1 \
+          https://github.com/kdrag0n/proton-clang \
+          clang
+
+
+    - name: Build Kernel
+      run: |
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+
+        export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+
+        mkdir out
+
+
+        # Xiaomi MIX2 chiron
+        make O=out chiron_defconfig
+
+
+        # 开启 KernelSU
+        echo "CONFIG_KSU=y" >> out/.config
+
+        make O=out olddefconfig
+
+
+        make \
+          O=out \
+          ARCH=arm64 \
+          CC=clang \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          LLVM=1 \
+          LLVM_IAS=1 \
+          -j$(nproc)
+
+
+
+    - name: Package
+      run: |
+        mkdir kernel-output
+
+        cp out/arch/arm64/boot/Image.gz-dtb \
+        kernel-output/
+
+        cp out/.config \
+        kernel-output/kernel.config
+
+
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: MIX2-chiron-KernelSU
+        path: kernel-output
