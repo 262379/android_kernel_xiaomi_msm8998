@@ -3,52 +3,64 @@ name: Build Xiaomi MIX2 MSM8998 KernelSU
 on:
   workflow_dispatch:
 
+
 jobs:
   build:
+
     runs-on: ubuntu-22.04
+
 
     steps:
 
-    - name: Checkout
+    - name: Checkout source
       uses: actions/checkout@v4
+
 
 
     - name: Install dependencies
       run: |
         sudo apt update
+
         sudo apt install -y \
           bc \
           bison \
           flex \
           build-essential \
           gcc-aarch64-linux-gnu \
+          gcc-arm-linux-gnueabi \
+          gcc-arm-linux-gnueabihf \
           libssl-dev \
           libelf-dev \
           curl \
           python3 \
           unzip \
-          zip
+          zip \
+          cpio
+
 
 
     - name: Setup KernelSU-Next
       run: |
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+        curl -LSs \
+        "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+        | bash -
 
 
-    - name: Download clang
+
+    - name: Download Proton Clang
       run: |
+
         git clone --depth=1 \
-          https://github.com/kdrag0n/proton-clang \
-          clang
+        https://github.com/kdrag0n/proton-clang \
+        clang
 
 
-    - name: Build Kernel
+
+    - name: Configure kernel
       run: |
 
         export ARCH=arm64
         export SUBARCH=arm64
-
-        export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
 
         mkdir out
 
@@ -57,10 +69,24 @@ jobs:
         make O=out chiron_defconfig
 
 
-        # 开启 KernelSU
-        echo "CONFIG_KSU=y" >> out/.config
+        # Enable KernelSU
+        scripts/config \
+        --file out/.config \
+        --enable CONFIG_KSU
+
 
         make O=out olddefconfig
+
+
+
+    - name: Build kernel
+      run: |
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+
+
+        export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
 
 
         make \
@@ -68,25 +94,54 @@ jobs:
           ARCH=arm64 \
           CC=clang \
           CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
           LLVM=1 \
           LLVM_IAS=1 \
           -j$(nproc)
 
 
 
-    - name: Package
+    - name: Check kernel output
       run: |
-        mkdir kernel-output
 
-        cp out/arch/arm64/boot/Image.gz-dtb \
-        kernel-output/
-
-        cp out/.config \
-        kernel-output/kernel.config
+        ls -lh out/arch/arm64/boot/
 
 
-    - name: Upload
+
+
+    - name: Prepare AnyKernel3
+      run: |
+
+        git clone --depth=1 \
+        https://github.com/osm0sis/AnyKernel3 \
+        AnyKernel3
+
+
+        cp \
+        out/arch/arm64/boot/Image.gz-dtb \
+        AnyKernel3/
+
+
+        cd AnyKernel3
+
+
+        sed -i \
+        's/kernel.string=.*/kernel.string=MIX2 MSM8998 KernelSU-Next/' \
+        anykernel.sh
+
+
+        zip -r9 \
+        ../KernelSU-MIX2-chiron.zip \
+        .
+
+
+
+
+    - name: Upload KernelSU ZIP
       uses: actions/upload-artifact@v4
+
       with:
-        name: MIX2-chiron-KernelSU
-        path: kernel-output
+
+        name: KernelSU-MIX2-chiron
+
+        path: KernelSU-MIX2-chiron.zip
