@@ -3,6 +3,7 @@ name: Build Xiaomi MIX2 MSM8998 KernelSU-Next
 'on':
   workflow_dispatch:
 
+
 jobs:
 
   build:
@@ -12,171 +13,89 @@ jobs:
 
     steps:
 
-    - name: Checkout Kernel Source
-      uses: actions/checkout@v4
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
 
 
+      - name: Install dependencies
+        run: |
+          sudo apt update
 
-    - name: Install dependencies
-      run: |
-
-        sudo apt update
-
-        sudo apt install -y \
-          bc \
-          bison \
-          flex \
-          build-essential \
-          gcc-aarch64-linux-gnu \
-          gcc-arm-linux-gnueabi \
-          gcc-arm-linux-gnueabihf \
-          libssl-dev \
-          libelf-dev \
-          curl \
-          python3 \
-          unzip \
-          zip \
-          cpio
+          sudo apt install -y \
+            bc \
+            bison \
+            flex \
+            build-essential \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            gcc-arm-linux-gnueabihf \
+            libssl-dev \
+            libelf-dev \
+            curl \
+            python3 \
+            unzip \
+            zip \
+            cpio
 
 
+      - name: Setup KernelSU-Next
+        run: |
 
-    - name: Setup KernelSU-Next
-      run: |
-
-        curl -LSs \
-        "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-        | bash -
-
+          curl -LSs \
+          "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+          | bash -
 
 
-    # 修复 Linux 4.4 msm8998 syscall_fn_t 缺失
-    - name: Patch KernelSU syscall_fn_t
-      run: |
+      - name: Check KernelSU files
+        run: |
 
-        FILE="drivers/kernelsu/hook/syscall_hook.h"
+          ls -la drivers/kernelsu
 
-
-        echo "Before patch:"
-        head -30 $FILE
+          test -f drivers/kernelsu/hook/syscall_hook.h
 
 
-        sed -i '/#include/a\
+      - name: Patch syscall_fn_t for Linux 4.4
+        run: |
+
+          FILE="drivers/kernelsu/hook/syscall_hook.h"
+
+
+          echo "Before patch:"
+          head -40 $FILE
+
+
+          sed -i '/#include/a\
 #ifndef syscall_fn_t\
 typedef long (*syscall_fn_t)(const struct pt_regs *);\
 #endif' \
-        $FILE
+          $FILE
 
 
-        echo "After patch:"
-        head -40 $FILE
-
-
-
-
-    - name: Setup Proton Clang
-      run: |
-
-        git clone --depth=1 \
-        https://github.com/kdrag0n/proton-clang \
-        clang
+          echo "After patch:"
+          head -50 $FILE
 
 
 
+      - name: Setup Proton Clang
+        run: |
 
-    - name: Configure Kernel
-      run: |
-
-        export ARCH=arm64
-        export SUBARCH=arm64
-
-
-        mkdir out
-
-
-        # Xiaomi MIX2
-        make O=out chiron_defconfig
-
-
-        # Enable KernelSU
-        scripts/config \
-        --file out/.config \
-        --enable CONFIG_KSU
-
-
-        make O=out olddefconfig
+          git clone \
+          --depth=1 \
+          --single-branch \
+          https://github.com/kdrag0n/proton-clang \
+          clang
 
 
 
-    - name: Check KernelSU Config
-      run: |
+      - name: Configure Kernel
+        run: |
 
-        grep KSU out/.config || true
-
-
-
-
-    - name: Build Kernel
-      run: |
-
-        export ARCH=arm64
-        export SUBARCH=arm64
+          export ARCH=arm64
+          export SUBARCH=arm64
 
 
-        export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          mkdir -p out
 
 
-        make \
-          O=out \
-          ARCH=arm64 \
-          CC=clang \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          -j$(nproc)
-
-
-
-
-    - name: Check Image
-      run: |
-
-        ls -lh out/arch/arm64/boot/
-
-
-
-
-    - name: Build AnyKernel3 ZIP
-      run: |
-
-        git clone --depth=1 \
-        https://github.com/osm0sis/AnyKernel3 \
-        AnyKernel3
-
-
-        cp \
-        out/arch/arm64/boot/Image.gz-dtb \
-        AnyKernel3/
-
-
-        cd AnyKernel3
-
-
-        sed -i \
-        's/kernel.string=.*/kernel.string=MIX2 MSM8998 KernelSU-Next/' \
-        anykernel.sh
-
-
-        zip -r9 \
-        ../KernelSU-MIX2-chiron.zip \
-        .
-
-
-
-
-    - name: Upload KernelSU ZIP
-      uses: actions/upload-artifact@v4
-
-      with:
-
-        name: KernelSU-MIX2-chiron
-
-        path: KernelSU-MIX2-chiron.zip
+          # Xiaomi MIX2 chiron
+          make O=out chiron
