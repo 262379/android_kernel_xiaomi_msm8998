@@ -376,6 +376,55 @@ jobs:
             cat "$HDR"
           fi
 
+      - name: Add ALIGN_DOWN compat macro for old kernel (Linux 4.4)
+        run: |
+          set -e
+
+          # drivers/kernelsu/feature/adb_root.c 用到了 ALIGN_DOWN 这个宏，
+          # 这是内核后来才加进 include/linux/kernel.h 的便捷宏（基于更早
+          # 就存在的 ALIGN 宏实现），4.4 内核里只有 ALIGN，没有 ALIGN_DOWN。
+          # 跟之前 compiler_types.h、copy_to_iter 是同一类问题：
+          # KernelSU-Next 的代码是照更新的内核写的。
+          #
+          # 这里往 include/linux/kernel.h 末尾追加一个基于 ALIGN 实现的
+          # ALIGN_DOWN 定义（用 #ifndef 包裹，如果这颗内核后续版本已经
+          # 自带这个宏就不会重复定义/冲突）。ALIGN 本身是非常古老、
+          # 基础的内核宏，4.4 内核里必然已经存在。
+          HDR="include/linux/kernel.h"
+
+          if [ ! -f "$HDR" ]; then
+            echo "[WARN] $HDR not found, cannot add ALIGN_DOWN shim. Build will likely fail."
+            exit 1
+          fi
+
+          if grep -q "define ALIGN_DOWN" "$HDR"; then
+            echo "ALIGN_DOWN already defined in $HDR, skipping."
+            exit 0
+          fi
+
+          if ! grep -q "define ALIGN(" "$HDR"; then
+            echo "[WARN] ALIGN macro not found in $HDR as expected."
+            echo "       Showing relevant grep across include/ for manual review:"
+            grep -rn "define ALIGN" include/ || true
+            exit 1
+          fi
+
+          cat >> "$HDR" << 'EOF'
+
+          /*
+           * Compatibility shim for kernels older than the one that introduced
+           * ALIGN_DOWN() as a convenience wrapper around the (much older)
+           * ALIGN() macro. Newer code (e.g. KernelSU-Next) expects this to
+           * exist.
+           */
+          #ifndef ALIGN_DOWN
+          #define ALIGN_DOWN(x, a) ALIGN((x) - ((a) - 1), (a))
+          #endif
+          EOF
+
+          echo "ALIGN_DOWN shim appended to $HDR:"
+          tail -10 "$HDR"
+
       - name: Patch copy_to_iter const-qualifier mismatch (Linux 4.4)
         run: |
           set -e
