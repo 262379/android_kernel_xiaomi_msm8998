@@ -99,6 +99,209 @@ jobs:
           # 后面统一在需要的文件里做兼容性判断
           echo "KernelSU source check complete."
 
+      - name: Manually integrate KernelSU-Next hooks (fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c, kernel/reboot.c)
+        run: |
+          set -e
+
+          # 改为手动集成方式（而不是依赖 kprobe 自动 hook）。
+          # 基于实际的 fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c,
+          # kernel/reboot.c 源码内容验证过每个插入点：
+          #   - 每个函数签名(func_anchor)在文件里都是唯一的
+          #   - hook 调用只在该函数签名之后的一个有限窗口内查找变量声明行
+          #     作为插入点，不会像之前那样匹配到其他函数里的同名局部变量
+          #     导致插入到错误的位置
+          #   - 插入点选在该函数所有局部变量声明结束之后，避免打断
+          #     C90 "先声明后语句" 的顺序要求
+          #   - do_execve 里对 AT_FDCWD 常量单独声明了一个真正的 int
+          #     局部变量再取地址，避免直接把整数常量强转成指针
+          #     (在 arm64 上 int 是 4 字节、指针是 8 字节，直接强转
+          #     会触发 -Wint-to-pointer-cast，在 -Werror 下即报错)
+          #
+          # 如果 chiron 分支的实际代码和这里的锚点对不上，脚本会为
+          # 该文件明确报错并打印上下文，而不是静默插错位置。
+          cat > patch_ksu_legacy.py << 'PYEOF'
+          #!/usr/bin/env python3
+          import re
+          import sys
+          from pathlib import Path
+
+          ROOT = Path(".")
+
+          PATCHES = [
+              {
+                  "file": "fs/exec.c",
+                  "guard": "ksu_handle_execveat(&ksu_fd",
+                  "func_anchor": r"^int do_execve\(struct filename \*filename,",
+                  "call_anchor": r"struct user_arg_ptr envp = \{ \.ptr\.native = __envp \};",
+                  "window": 400,
+                  "extern_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n"
+                      "\t\t\t\tvoid *argv, void *envp, int *flags);\n"
+                      "#endif\n\n"
+                  ),
+                  "call_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "\t{\n"
+                      "\t\tint ksu_fd = AT_FDCWD;\n"
+                      "\t\tksu_handle_execveat(&ksu_fd, &filename, &argv, &envp, NULL);\n"
+                      "\t}\n"
+                      "#endif\n"
+                  ),
+              },
+              {
+                  "file": "fs/exec.c",
+                  "guard": "ksu_handle_execveat(&fd",
+                  "func_anchor": r"^int do_execveat\(int fd, struct filename \*filename,",
+                  "call_anchor": r"struct user_arg_ptr envp = \{ \.ptr\.native = __envp \};",
+                  "window": 400,
+                  "extern_code": "",
+                  "call_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
+                      "#endif\n"
+                  ),
+              },
+              {
+                  "file": "fs/open.c",
+                  "guard": "ksu_handle_faccessat",
+                  "func_anchor": r"^SYSCALL_DEFINE3\(faccessat, int, dfd, const char __user \*, filename, int, mode\)",
+                  "call_anchor": r"unsigned int lookup_flags = LOOKUP_FOLLOW;",
+                  "window": 400,
+                  "extern_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n"
+                      "\t\t\t\tint *mode, int *flags);\n"
+                      "#endif\n\n"
+                  ),
+                  "call_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+                      "#endif\n"
+                  ),
+              },
+              {
+                  "file": "fs/read_write.c",
+                  "guard": "ksu_handle_sys_read",
+                  "func_anchor": r"^SYSCALL_DEFINE3\(read, unsigned int, fd, char __user \*, buf, size_t, count\)",
+                  "call_anchor": r"ssize_t ret = -EBADF;",
+                  "window": 300,
+                  "extern_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr,\n"
+                      "\t\t\t\tsize_t *count_ptr);\n"
+                      "#endif\n\n"
+                  ),
+                  "call_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "\tksu_handle_sys_read(fd, &buf, &count);\n"
+                      "#endif\n"
+                  ),
+              },
+              {
+                  "file": "fs/stat.c",
+                  "guard": "ksu_handle_stat",
+                  "func_anchor": r"^SYSCALL_DEFINE4\(newfstatat, int, dfd, const char __user \*, filename,",
+                  "call_anchor": r"struct kstat stat;\n\tint error;",
+                  "window": 300,
+                  "extern_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n"
+                      "\t\t\t\tint *flags);\n"
+                      "#endif\n\n"
+                  ),
+                  "call_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "\tksu_handle_stat(&dfd, &filename, &flag);\n"
+                      "#endif\n"
+                  ),
+              },
+              {
+                  "file": "kernel/reboot.c",
+                  "guard": "ksu_handle_sys_reboot",
+                  "func_anchor": r"^SYSCALL_DEFINE4\(reboot, int, magic1, int, magic2, unsigned int, cmd,",
+                  "call_anchor": r"int ret = 0;",
+                  "window": 400,
+                  "extern_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
+                      "#endif\n\n"
+                  ),
+                  "call_code": (
+                      "#ifdef CONFIG_KSU\n"
+                      "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
+                      "#endif\n"
+                  ),
+              },
+          ]
+
+          failures = []
+          touched_files = {}
+
+          for p in PATCHES:
+              path = ROOT / p["file"]
+              if not path.exists():
+                  failures.append(f"[MISSING FILE] {p['file']} 不存在，请确认内核源码路径是否正确")
+                  continue
+
+              text = touched_files.get(p["file"])
+              if text is None:
+                  text = path.read_text()
+
+              if p["guard"] and p["guard"] in text:
+                  print(f"[SKIP] {p['file']} 已经包含 '{p['guard']}'，视为已打过补丁")
+                  touched_files[p["file"]] = text
+                  continue
+
+              func_re = re.compile(p["func_anchor"], re.MULTILINE)
+              fm = func_re.search(text)
+              if not fm:
+                  failures.append(
+                      f"[NO MATCH] {p['file']}: 找不到函数签名 (正则: {p['func_anchor']})\n"
+                      f"           需要手动核对该文件里对应函数的实际签名。"
+                  )
+                  continue
+
+              window_start = fm.end()
+              window_end = window_start + p["window"]
+              window_text = text[window_start:window_end]
+
+              call_re = re.compile(p["call_anchor"])
+              cm = call_re.search(window_text)
+              if not cm:
+                  failures.append(
+                      f"[NO MATCH] {p['file']}: 在函数 '{p['func_anchor']}' 之后 {p['window']} 字符窗口内\n"
+                      f"           找不到调用插入点 (正则: {p['call_anchor']})\n"
+                      f"           窗口内容:\n{window_text}\n"
+                      f"           需要手动核对。"
+                  )
+                  continue
+
+              call_insert_pos = window_start + cm.end()
+
+              call_insertion = "\n" + p["call_code"]
+              text = text[:call_insert_pos] + call_insertion + text[call_insert_pos:]
+
+              if p["extern_code"]:
+                  text = text[: fm.start()] + p["extern_code"] + text[fm.start():]
+
+              touched_files[p["file"]] = text
+              print(f"[OK] {p['file']}: 已在函数 '{p['func_anchor'][:50]}...' 内插入 hook 调用")
+
+          for fname, text in touched_files.items():
+              (ROOT / fname).write_text(text)
+
+          if failures:
+              print("\n===== 以下文件需要手动处理 =====")
+              for f in failures:
+                  print(f)
+              sys.exit(1)
+
+          print("\n全部补丁应用成功。")
+          PYEOF
+
+          python3 patch_ksu_legacy.py
+
       - name: Patch syscall_fn_t for Linux 4.4 (compat shim)
         run: |
           set -e
@@ -232,25 +435,19 @@ jobs:
           # Xiaomi MIX2 chiron
           make O=out chiron_defconfig
 
-          # KernelSU-Next 在非 GKI 内核上优先使用 kprobe 方式做 hook
-          # （而不是手动改内核源码）。上一次构建日志显示它已经自动
-          # 选择了 "Hook mode: Kprobes" 并 patch 了 fs/namespace.c、
-          # selinux 相关文件，说明这条路径本身是可行的。
-          # 这里显式打开官方文档要求的三个配置项，避免因为 defconfig
-          # 里没有这些项而被静默降级或跳过：
-          # https://kernelsu-next.github.io/webpage/zh_CN/pages/how-to-integrate-for-non-gki.html
+          # 现在改为手动集成方式（在源码里直接插入 hook 调用），
+          # 显式关闭 KSU 的 kprobe hook 模式，避免手动 hook 和
+          # kprobe 自动 hook 同时生效导致冲突/重复处理。
           scripts/config \
           --file out/.config \
           --enable CONFIG_KSU \
-          --enable CONFIG_KPROBES \
-          --enable CONFIG_KPROBE_EVENTS \
-          --enable CONFIG_KSU_KPROBE_HOOKS
+          --disable CONFIG_KSU_KPROBE_HOOKS
 
           make O=out olddefconfig
 
       - name: Check KernelSU config
         run: |
-          grep -E "CONFIG_KSU|CONFIG_KPROBE" out/.config || true
+          grep -E "CONFIG_KSU" out/.config || true
 
       - name: Build Kernel
         run: |
