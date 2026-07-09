@@ -26,11 +26,32 @@ jobs:
             libelf-dev \
             libncurses-dev \
             device-tree-compiler \
+            ccache \
             curl \
             python3 \
             unzip \
             zip \
             cpio
+
+      - name: Cache ccache compilation cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          # key 里带上 github.run_id 保证每次都会在结束时保存一份新的，
+          # restore-keys 保证即使 key 没有精确命中，也能取到最近一次的
+          # 缓存作为起点（增量编译），而不是每次都从空缓存开始。
+          key: ${{ runner.os }}-ccache-mix2-chiron-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-mix2-chiron-
+
+      - name: Cache Proton Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          # Proton Clang 已经停止更新，用一个固定 key 就行——工具链内容
+          # 基本不会变化，缓存命中后可以完全跳过几百 MB 的 clone。
+          key: proton-clang-toolchain-v1
 
       - name: Setup KernelSU-Next (non-GKI legacy mode)
         run: |
@@ -383,47 +404,39 @@ jobs:
           # drivers/kernelsu/feature/adb_root.c 用到了 ALIGN_DOWN 这个宏，
           # 这是内核后来才加进 include/linux/kernel.h 的便捷宏（基于更早
           # 就存在的 ALIGN 宏实现），4.4 内核里只有 ALIGN，没有 ALIGN_DOWN。
-          # 跟之前 compiler_types.h、copy_to_iter 是同一类问题：
-          # KernelSU-Next 的代码是照更新的内核写的。
           #
-          # 这里往 include/linux/kernel.h 末尾追加一个基于 ALIGN 实现的
-          # ALIGN_DOWN 定义（用 #ifndef 包裹，如果这颗内核后续版本已经
-          # 自带这个宏就不会重复定义/冲突）。ALIGN 本身是非常古老、
-          # 基础的内核宏，4.4 内核里必然已经存在。
-          HDR="include/linux/kernel.h"
+          # 上一版补丁把 ALIGN_DOWN 加进了全局的 include/linux/kernel.h，
+          # 结果撞上了 fs/f2fs/f2fs.h 里已经存在的一份同名兼容定义
+          # （f2fs 那边不带 #ifndef 保护，直接 #define，导致任何同时
+          # include kernel.h 和 f2fs.h 的文件都会 "macro redefined"）。
+          #
+          # 改成只在真正引用了 ALIGN_DOWN 的 drivers/kernelsu 文件内部
+          # 局部定义，不去动全局的 kernel.h，这样完全不会影响
+          # fs/f2fs/* 等其他子系统。用 #ifndef 包裹，如果该文件本身
+          # 已经通过某个头文件间接拿到了 ALIGN_DOWN，也不会冲突。
+          TARGET_FILES=$(grep -rl "ALIGN_DOWN" drivers/kernelsu || true)
 
-          if [ ! -f "$HDR" ]; then
-            echo "[WARN] $HDR not found, cannot add ALIGN_DOWN shim. Build will likely fail."
-            exit 1
-          fi
-
-          if grep -q "define ALIGN_DOWN" "$HDR"; then
-            echo "ALIGN_DOWN already defined in $HDR, skipping."
+          if [ -z "$TARGET_FILES" ]; then
+            echo "No files under drivers/kernelsu reference ALIGN_DOWN, nothing to patch."
             exit 0
           fi
 
-          if ! grep -q "define ALIGN(" "$HDR"; then
-            echo "[WARN] ALIGN macro not found in $HDR as expected."
-            echo "       Showing relevant grep across include/ for manual review:"
-            grep -rn "define ALIGN" include/ || true
-            exit 1
-          fi
+          for FILE in $TARGET_FILES; do
+            echo "Checking $FILE"
 
-          cat >> "$HDR" << 'EOF'
+            if grep -q "__KSU_ALIGN_DOWN_COMPAT" "$FILE"; then
+              echo "  already patched, skipping"
+              continue
+            fi
 
-          /*
-           * Compatibility shim for kernels older than the one that introduced
-           * ALIGN_DOWN() as a convenience wrapper around the (much older)
-           * ALIGN() macro. Newer code (e.g. KernelSU-Next) expects this to
-           * exist.
-           */
-          #ifndef ALIGN_DOWN
-          #define ALIGN_DOWN(x, a) ALIGN((x) - ((a) - 1), (a))
-          #endif
-          EOF
+            echo "Before patch (head):"
+            head -20 "$FILE"
 
-          echo "ALIGN_DOWN shim appended to $HDR:"
-          tail -10 "$HDR"
+            sed -i '1i #ifndef __KSU_ALIGN_DOWN_COMPAT\n#define __KSU_ALIGN_DOWN_COMPAT\n#ifndef ALIGN_DOWN\n#define ALIGN_DOWN(x, a) ALIGN((x) - ((a) - 1), (a))\n#endif\n#endif' "$FILE"
+
+            echo "After patch (head):"
+            head -30 "$FILE"
+          done
 
       - name: Patch copy_to_iter const-qualifier mismatch (Linux 4.4)
         run: |
@@ -468,11 +481,16 @@ jobs:
 
       - name: Setup Proton Clang
         run: |
-          git clone \
-          --depth=1 \
-          --single-branch \
-          https://github.com/kdrag0n/proton-clang \
-          clang
+          if [ -d "clang/bin" ] && [ -x "clang/bin/clang" ]; then
+            echo "Proton Clang restored from cache, skipping clone."
+            clang/bin/clang --version || true
+          else
+            git clone \
+            --depth=1 \
+            --single-branch \
+            https://github.com/kdrag0n/proton-clang \
+            clang
+          fi
 
       - name: Configure Kernel
         run: |
@@ -505,14 +523,24 @@ jobs:
 
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
 
+          # 用 ccache 包一层 clang，缓存编译产物。设置一个合理的
+          # 容量上限，避免缓存无限增长；CCACHE_DIR 用默认的
+          # ~/.ccache，跟上面 actions/cache 缓存的路径对应上。
+          export CCACHE_DIR="$HOME/.ccache"
+          export CCACHE_MAXSIZE=2G
+          ccache -z
+
           make \
             O=out \
             ARCH=arm64 \
-            CC=clang \
+            CC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             -j"$(nproc)"
+
+          echo "----- ccache stats -----"
+          ccache -s
 
       - name: Check Kernel Output
         run: |
