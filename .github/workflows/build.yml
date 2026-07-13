@@ -1,591 +1,162 @@
-name: Build Xiaomi MIX2 MSM8998 KernelSU-Next
+name: Build chiron kernel (KernelSU-Next manual hook)
 
-'on':
+on:
   workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "内核源码仓库"
+        required: false
+        default: "LineageOS/android_kernel_xiaomi_msm8998"
+      kernel_branch:
+        description: "内核源码分支"
+        required: false
+        default: "lineage-22.2"
+      defconfig:
+        description: "defconfig 文件名(不含路径)"
+        required: false
+        default: "chiron_defconfig"
+      ksu_next_ref:
+        description: "KernelSU-Next 分支/tag(setup.sh 拉取用)"
+        required: false
+        default: "next"
+      anykernel_repo:
+        description: "AnyKernel3 模板仓库(会用 anykernel/anykernel.sh 覆盖其中的 anykernel.sh)"
+        required: false
+        default: "osm0sis/AnyKernel3"
+
+env:
+  KERNEL_DIR: kernel_src
+  ARCH: arm64
+  # 64-bit / 32-bit(compat vDSO)交叉工具链前缀,配合 LLVM=1 使用
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CROSS_COMPILE_ARM32: arm-linux-gnueabi-
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
-      - name: Checkout Kernel Source
+      - name: Checkout workflow/scripts repo
         uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            bc \
-            bison \
-            flex \
-            build-essential \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            gcc-arm-linux-gnueabihf \
-            libssl-dev \
-            libelf-dev \
-            libncurses-dev \
-            device-tree-compiler \
-            ccache \
-            curl \
-            python3 \
-            unzip \
-            zip \
-            cpio
-
-      - name: Cache ccache compilation cache
-        uses: actions/cache@v4
         with:
-          path: ~/.ccache
-          # key 里带上 github.run_id 保证每次都会在结束时保存一份新的，
-          # restore-keys 保证即使 key 没有精确命中，也能取到最近一次的
-          # 缓存作为起点（增量编译），而不是每次都从空缓存开始。
-          key: ${{ runner.os }}-ccache-mix2-chiron-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-ccache-mix2-chiron-
+          path: workflow-repo
 
-      - name: Cache Proton Clang toolchain
-        id: cache-clang
-        uses: actions/cache@v4
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
         with:
-          path: clang
-          # Proton Clang 已经停止更新，用一个固定 key 就行——工具链内容
-          # 基本不会变化，缓存命中后可以完全跳过几百 MB 的 clone。
-          key: proton-clang-toolchain-v1
+          repository: ${{ github.event.inputs.kernel_repo }}
+          ref: ${{ github.event.inputs.kernel_branch }}
+          path: ${{ env.KERNEL_DIR }}
+          fetch-depth: 1
 
-      - name: Setup KernelSU-Next (non-GKI legacy mode)
+      - name: Free disk space
         run: |
-          set -e
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h
 
-          # 官方文档明确要求非 GKI 内核使用 "legacy" 参数集成：
-          # https://kernelsu-next.github.io/webpage/zh_CN/pages/how-to-integrate-for-non-gki.html
-          # 之前不带 -s legacy 走的是 GKI 向的默认集成方式，
-          # 这在 Linux 4.4 (msm8998/chiron) 上会引入不兼容的代码。
-          #
-          # 之前直接 curl | bash 出过问题：GitHub 对 raw.githubusercontent.com
-          # 偶尔会返回限流/反爬虫的错误页面而不是脚本内容，curl 不加 -f
-          # 时不会因为 HTTP 错误状态码而失败，导致这段错误页面文本被当成
-          # bash 脚本执行，报一堆语法错误。
-          #
-          # 这里改成: 下载到文件 -> 校验看起来像正常脚本(而不是HTML/限流提示)
-          # -> 失败自动重试几次 -> 校验通过再执行。
-          URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
-          OUT="setup_ksu.sh"
-
-          MAX_RETRIES=5
-          for i in $(seq 1 $MAX_RETRIES); do
-            echo "Attempt $i/$MAX_RETRIES: downloading setup.sh"
-
-            if curl -fLSs --retry 3 --retry-delay 2 -o "$OUT" "$URL"; then
-              # 简单校验: 正常脚本应该以 shebang 或 shell 常见语句开头，
-              # 不应该包含 GitHub 限流/反爬虫页面的特征字符串。
-              if grep -qi "rate limit\|scraping\|<html\|<!DOCTYPE" "$OUT"; then
-                echo "Downloaded content looks like an error page, not a script. Retrying..."
-                cat "$OUT"
-                sleep $((i * 3))
-                continue
-              fi
-
-              if [ ! -s "$OUT" ]; then
-                echo "Downloaded file is empty. Retrying..."
-                sleep $((i * 3))
-                continue
-              fi
-
-              echo "Download looks valid, proceeding."
-              break
-            else
-              echo "curl failed (HTTP error or network issue). Retrying..."
-              sleep $((i * 3))
-            fi
-
-            if [ "$i" -eq "$MAX_RETRIES" ]; then
-              echo "Failed to download a valid setup.sh after $MAX_RETRIES attempts."
-              exit 1
-            fi
-          done
-
-          echo "----- setup.sh head (sanity check) -----"
-          head -20 "$OUT"
-          echo "-----------------------------------------"
-
-          bash "$OUT" legacy
-
-      - name: Check KernelSU files
+      - name: Install build dependencies
         run: |
-          echo "Listing drivers/kernelsu recursively:"
-          find drivers/kernelsu -type f
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev \
+            build-essential ca-certificates curl git \
+            python3 python3-pip \
+            zip unzip device-tree-compiler \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-          # 不再硬编码某一个文件名，动态找出所有 .h/.c 文件，
-          # 后面统一在需要的文件里做兼容性判断
-          echo "KernelSU source check complete."
-
-      - name: Manually integrate KernelSU-Next hooks (fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c, kernel/reboot.c)
+      # Clang: 官方 AOSP 预编译工具链(克隆一个较小的稳定 tag,避免整个仓库历史)
+      - name: Fetch Clang toolchain
         run: |
-          set -e
+          mkdir -p clang
+          curl -L -o clang.tar.gz \
+            "https://github.com/greenforce-project/greenforce_clang/releases/latest/download/greenforce-clang.tar.gz" \
+            || curl -L -o clang.tar.gz \
+            "https://github.com/ZyCromerZ/Clang/releases/latest/download/Clang-latest.tar.gz"
+          tar -xf clang.tar.gz -C clang
+          echo "$PWD/clang/bin" >> "$GITHUB_PATH"
 
-          # 改为手动集成方式（而不是依赖 kprobe 自动 hook）。
-          # 基于实际的 fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c,
-          # kernel/reboot.c 源码内容验证过每个插入点：
-          #   - 每个函数签名(func_anchor)在文件里都是唯一的
-          #   - hook 调用只在该函数签名之后的一个有限窗口内查找变量声明行
-          #     作为插入点，不会像之前那样匹配到其他函数里的同名局部变量
-          #     导致插入到错误的位置
-          #   - 插入点选在该函数所有局部变量声明结束之后，避免打断
-          #     C90 "先声明后语句" 的顺序要求
-          #   - do_execve 里对 AT_FDCWD 常量单独声明了一个真正的 int
-          #     局部变量再取地址，避免直接把整数常量强转成指针
-          #     (在 arm64 上 int 是 4 字节、指针是 8 字节，直接强转
-          #     会触发 -Wint-to-pointer-cast，在 -Werror 下即报错)
-          #
-          # 如果 chiron 分支的实际代码和这里的锚点对不上，脚本会为
-          # 该文件明确报错并打印上下文，而不是静默插错位置。
-          cat > patch_ksu_legacy.py << 'PYEOF'
-          #!/usr/bin/env python3
-          import re
-          import sys
-          from pathlib import Path
-
-          ROOT = Path(".")
-
-          PATCHES = [
-              {
-                  "file": "fs/exec.c",
-                  "guard": "ksu_handle_execveat(&ksu_fd",
-                  "func_anchor": r"^int do_execve\(struct filename \*filename,",
-                  "call_anchor": r"struct user_arg_ptr envp = \{ \.ptr\.native = __envp \};",
-                  "window": 400,
-                  "extern_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n"
-                      "\t\t\t\tvoid *argv, void *envp, int *flags);\n"
-                      "#endif\n\n"
-                  ),
-                  "call_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "\t{\n"
-                      "\t\tint ksu_fd = AT_FDCWD;\n"
-                      "\t\tksu_handle_execveat(&ksu_fd, &filename, &argv, &envp, NULL);\n"
-                      "\t}\n"
-                      "#endif\n"
-                  ),
-              },
-              {
-                  "file": "fs/exec.c",
-                  "guard": "ksu_handle_execveat(&fd",
-                  "func_anchor": r"^int do_execveat\(int fd, struct filename \*filename,",
-                  "call_anchor": r"struct user_arg_ptr envp = \{ \.ptr\.native = __envp \};",
-                  "window": 400,
-                  "extern_code": "",
-                  "call_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
-                      "#endif\n"
-                  ),
-              },
-              {
-                  "file": "fs/open.c",
-                  "guard": "ksu_handle_faccessat",
-                  "func_anchor": r"^SYSCALL_DEFINE3\(faccessat, int, dfd, const char __user \*, filename, int, mode\)",
-                  "call_anchor": r"unsigned int lookup_flags = LOOKUP_FOLLOW;",
-                  "window": 400,
-                  "extern_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n"
-                      "\t\t\t\tint *mode, int *flags);\n"
-                      "#endif\n\n"
-                  ),
-                  "call_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
-                      "#endif\n"
-                  ),
-              },
-              {
-                  "file": "fs/read_write.c",
-                  "guard": "ksu_handle_sys_read",
-                  "func_anchor": r"^SYSCALL_DEFINE3\(read, unsigned int, fd, char __user \*, buf, size_t, count\)",
-                  "call_anchor": r"ssize_t ret = -EBADF;",
-                  "window": 300,
-                  "extern_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr,\n"
-                      "\t\t\t\tsize_t *count_ptr);\n"
-                      "#endif\n\n"
-                  ),
-                  "call_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "\tksu_handle_sys_read(fd, &buf, &count);\n"
-                      "#endif\n"
-                  ),
-              },
-              {
-                  "file": "fs/stat.c",
-                  "guard": "ksu_handle_stat",
-                  "func_anchor": r"^SYSCALL_DEFINE4\(newfstatat, int, dfd, const char __user \*, filename,",
-                  "call_anchor": r"struct kstat stat;\n\tint error;",
-                  "window": 300,
-                  "extern_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n"
-                      "\t\t\t\tint *flags);\n"
-                      "#endif\n\n"
-                  ),
-                  "call_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "\tksu_handle_stat(&dfd, &filename, &flag);\n"
-                      "#endif\n"
-                  ),
-              },
-              {
-                  "file": "kernel/reboot.c",
-                  "guard": "ksu_handle_sys_reboot",
-                  "func_anchor": r"^SYSCALL_DEFINE4\(reboot, int, magic1, int, magic2, unsigned int, cmd,",
-                  "call_anchor": r"int ret = 0;",
-                  "window": 400,
-                  "extern_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
-                      "#endif\n\n"
-                  ),
-                  "call_code": (
-                      "#ifdef CONFIG_KSU\n"
-                      "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
-                      "#endif\n"
-                  ),
-              },
-          ]
-
-          failures = []
-          touched_files = {}
-
-          for p in PATCHES:
-              path = ROOT / p["file"]
-              if not path.exists():
-                  failures.append(f"[MISSING FILE] {p['file']} 不存在，请确认内核源码路径是否正确")
-                  continue
-
-              text = touched_files.get(p["file"])
-              if text is None:
-                  text = path.read_text()
-
-              if p["guard"] and p["guard"] in text:
-                  print(f"[SKIP] {p['file']} 已经包含 '{p['guard']}'，视为已打过补丁")
-                  touched_files[p["file"]] = text
-                  continue
-
-              func_re = re.compile(p["func_anchor"], re.MULTILINE)
-              fm = func_re.search(text)
-              if not fm:
-                  failures.append(
-                      f"[NO MATCH] {p['file']}: 找不到函数签名 (正则: {p['func_anchor']})\n"
-                      f"           需要手动核对该文件里对应函数的实际签名。"
-                  )
-                  continue
-
-              window_start = fm.end()
-              window_end = window_start + p["window"]
-              window_text = text[window_start:window_end]
-
-              call_re = re.compile(p["call_anchor"])
-              cm = call_re.search(window_text)
-              if not cm:
-                  failures.append(
-                      f"[NO MATCH] {p['file']}: 在函数 '{p['func_anchor']}' 之后 {p['window']} 字符窗口内\n"
-                      f"           找不到调用插入点 (正则: {p['call_anchor']})\n"
-                      f"           窗口内容:\n{window_text}\n"
-                      f"           需要手动核对。"
-                  )
-                  continue
-
-              call_insert_pos = window_start + cm.end()
-
-              call_insertion = "\n" + p["call_code"]
-              text = text[:call_insert_pos] + call_insertion + text[call_insert_pos:]
-
-              if p["extern_code"]:
-                  text = text[: fm.start()] + p["extern_code"] + text[fm.start():]
-
-              touched_files[p["file"]] = text
-              print(f"[OK] {p['file']}: 已在函数 '{p['func_anchor'][:50]}...' 内插入 hook 调用")
-
-          for fname, text in touched_files.items():
-              (ROOT / fname).write_text(text)
-
-          if failures:
-              print("\n===== 以下文件需要手动处理 =====")
-              for f in failures:
-                  print(f)
-              sys.exit(1)
-
-          print("\n全部补丁应用成功。")
-          PYEOF
-
-          python3 patch_ksu_legacy.py
-
-      - name: Patch syscall_fn_t for Linux 4.4 (compat shim)
+      - name: Add KernelSU-Next to kernel source tree
+        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          set -e
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_next_ref }}/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_next_ref }}"
 
-          # 动态定位可能需要 syscall_fn_t 的文件，而不是假设固定路径。
-          # KernelSU-Next 的目录结构会随版本变化，硬编码路径容易在
-          # 分支更新后直接导致 job 失败。
-          TARGET_FILES=$(grep -rl "syscall_fn_t" drivers/kernelsu || true)
-
-          if [ -z "$TARGET_FILES" ]; then
-            echo "No files reference syscall_fn_t, nothing to patch."
-            exit 0
-          fi
-
-          for FILE in $TARGET_FILES; do
-            echo "Checking $FILE"
-
-            # 如果这个文件里已经有我们的 compat guard 或者内核头本身
-            # 已经定义了 syscall_fn_t 类型，就跳过，避免重复插入
-            # 或者与已有定义冲突（#ifndef 对 typedef 无效，必须用
-            # 自定义宏做 guard）。
-            if grep -q "__KSU_SYSCALL_FN_T_COMPAT" "$FILE"; then
-              echo "  already patched, skipping"
-              continue
-            fi
-
-            echo "Before patch (head):"
-            head -20 "$FILE"
-
-            # 只在文件最顶部插入一次，用独立宏 guard，
-            # 不依赖 typedef 本身作为 ifndef 条件。
-            sed -i '1i #ifndef __KSU_SYSCALL_FN_T_COMPAT\n#define __KSU_SYSCALL_FN_T_COMPAT\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n#endif' "$FILE"
-
-            echo "After patch (head):"
-            head -30 "$FILE"
-          done
-
-      - name: Add compiler_types.h compat shim for old kernel (Linux 4.4)
+      - name: Apply manual hook patches
         run: |
-          set -e
+          python3 workflow-repo/scripts/ksu_manual_patch.py \
+            "${KERNEL_DIR}" \
+            "${KERNEL_DIR}/arch/arm64/configs/${{ github.event.inputs.defconfig }}"
 
-          # msm8998 (chiron) 使用的是 Linux 4.4，而 include/linux/compiler_types.h
-          # 是内核 4.11+ 才从 compiler.h 里拆分出来的独立头文件，4.4 树里根本
-          # 不存在这个文件。KernelSU-Next v3.3.0 新增的 feature/sulog.c 是按
-          # 现代内核写的，直接 #include <linux/compiler_types.h>，导致
-          # "file not found"。
-          #
-          # 这里补一个兼容 shim：如果文件不存在就创建一个转发到 compiler.h
-          # 的空壳，4.4 内核的 compiler.h 已经提供了大部分必需的宏
-          # (likely/unlikely、属性宏等)，足够满足 sulog.c 的需求。
-          HDR="include/linux/compiler_types.h"
-
-          if [ -f "$HDR" ]; then
-            echo "$HDR already exists, no shim needed."
-          else
-            echo "Creating compat shim at $HDR"
-            cat > "$HDR" << 'EOF'
-          #ifndef _LINUX_COMPILER_TYPES_H
-          #define _LINUX_COMPILER_TYPES_H
-
-          /*
-           * Compatibility shim for kernels older than 4.11 that don't ship
-           * include/linux/compiler_types.h. Newer code (e.g. KernelSU-Next)
-           * expects this header to exist; on old trees the equivalent macros
-           * live in compiler.h, so just forward to it.
-           */
-          #include <linux/compiler.h>
-
-          #endif /* _LINUX_COMPILER_TYPES_H */
-          EOF
-            echo "Shim created:"
-            cat "$HDR"
-          fi
-
-      - name: Add ALIGN_DOWN compat macro for old kernel (Linux 4.4)
+      - name: Show resulting patch (for CI log review)
+        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          set -e
+          git diff --stat || true
+          tail -n 6 "arch/arm64/configs/${{ github.event.inputs.defconfig }}"
 
-          # drivers/kernelsu/feature/adb_root.c 用到了 ALIGN_DOWN 这个宏，
-          # 这是内核后来才加进 include/linux/kernel.h 的便捷宏（基于更早
-          # 就存在的 ALIGN 宏实现），4.4 内核里只有 ALIGN，没有 ALIGN_DOWN。
-          #
-          # 上一版补丁把 ALIGN_DOWN 加进了全局的 include/linux/kernel.h，
-          # 结果撞上了 fs/f2fs/f2fs.h 里已经存在的一份同名兼容定义
-          # （f2fs 那边不带 #ifndef 保护，直接 #define，导致任何同时
-          # include kernel.h 和 f2fs.h 的文件都会 "macro redefined"）。
-          #
-          # 改成只在真正引用了 ALIGN_DOWN 的 drivers/kernelsu 文件内部
-          # 局部定义，不去动全局的 kernel.h，这样完全不会影响
-          # fs/f2fs/* 等其他子系统。用 #ifndef 包裹，如果该文件本身
-          # 已经通过某个头文件间接拿到了 ALIGN_DOWN，也不会冲突。
-          TARGET_FILES=$(grep -rl "ALIGN_DOWN" drivers/kernelsu || true)
-
-          if [ -z "$TARGET_FILES" ]; then
-            echo "No files under drivers/kernelsu reference ALIGN_DOWN, nothing to patch."
-            exit 0
-          fi
-
-          for FILE in $TARGET_FILES; do
-            echo "Checking $FILE"
-
-            if grep -q "__KSU_ALIGN_DOWN_COMPAT" "$FILE"; then
-              echo "  already patched, skipping"
-              continue
-            fi
-
-            echo "Before patch (head):"
-            head -20 "$FILE"
-
-            sed -i '1i #ifndef __KSU_ALIGN_DOWN_COMPAT\n#define __KSU_ALIGN_DOWN_COMPAT\n#ifndef ALIGN_DOWN\n#define ALIGN_DOWN(x, a) ALIGN((x) - ((a) - 1), (a))\n#endif\n#endif' "$FILE"
-
-            echo "After patch (head):"
-            head -30 "$FILE"
-          done
-
-      - name: Patch copy_to_iter const-qualifier mismatch (Linux 4.4)
+      - name: Build kernel
+        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          set -e
+          export PATH="$PWD/../clang/bin:$PATH"
+          make -j"$(nproc)" O=out ARCH=${ARCH} \
+            LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=${CROSS_COMPILE} \
+            CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
+            ${{ github.event.inputs.defconfig }}
+          make -j"$(nproc)" O=out ARCH=${ARCH} \
+            LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=${CROSS_COMPILE} \
+            CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
+            2>&1 | tee build.log
 
-          # drivers/kernelsu/runtime/ksud_integration.c 里调用:
-          #   copy_to_iter(KERNEL_SU_RC + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to);
-          # 传入的是 const char*，但这颗 4.4 内核里 copy_to_iter 的签名是
-          #   size_t copy_to_iter(void *addr, size_t bytes, struct iov_iter *i);
-          # 第一个参数是不带 const 的 void*（较新内核后来改成了 const void*，
-          # KernelSU-Next 的代码是照新内核写的）。这里只是从这块内存读数据
-          # 拷贝出去，并不会写入，强转掉 const 是安全的，纯粹是新旧内核
-          # API 签名差异导致的类型不匹配。
-          FILE="drivers/kernelsu/runtime/ksud_integration.c"
-
-          if [ ! -f "$FILE" ]; then
-            echo "$FILE not found, skipping (directory layout may differ)."
-            exit 0
-          fi
-
-          if grep -q "(void \*)(KERNEL_SU_RC" "$FILE"; then
-            echo "Already patched, skipping."
-            exit 0
-          fi
-
-          if ! grep -q "copy_to_iter(KERNEL_SU_RC + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to);" "$FILE"; then
-            echo "[WARN] Expected call pattern not found in $FILE."
-            echo "       The actual source may differ; showing context around 'copy_to_iter' for manual review:"
-            grep -n "copy_to_iter" "$FILE" || true
-            exit 1
-          fi
-
-          echo "Before patch:"
-          grep -n "copy_to_iter" "$FILE"
-
-          sed -i \
-            's/copy_to_iter(KERNEL_SU_RC + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to);/copy_to_iter((void *)(KERNEL_SU_RC + ksu_rc_pos), ksu_rc_len - ksu_rc_pos, to);/' \
-            "$FILE"
-
-          echo "After patch:"
-          grep -n "copy_to_iter" "$FILE"
-
-      - name: Setup Proton Clang
+      - name: Locate build output
+        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          if [ -d "clang/bin" ] && [ -x "clang/bin/clang" ]; then
-            echo "Proton Clang restored from cache, skipping clone."
-            clang/bin/clang --version || true
-          else
-            git clone \
-            --depth=1 \
-            --single-branch \
-            https://github.com/kdrag0n/proton-clang \
-            clang
-          fi
+          find out/arch/arm64/boot -maxdepth 1 -type f \( -name "Image*" -o -name "*.dtb" \) -print
+          mkdir -p ../dist
+          cp out/arch/arm64/boot/Image.gz-dtb ../dist/ 2>/dev/null || true
+          cp out/arch/arm64/boot/Image.gz ../dist/ 2>/dev/null || true
+          cp out/arch/arm64/boot/Image ../dist/ 2>/dev/null || true
+          ls ../dist
 
-      - name: Configure Kernel
-        run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-
-          mkdir -p out
-
-          # Xiaomi MIX2 chiron
-          make O=out chiron_defconfig
-
-          # 现在改为手动集成方式（在源码里直接插入 hook 调用），
-          # 显式关闭 KSU 的 kprobe hook 模式，避免手动 hook 和
-          # kprobe 自动 hook 同时生效导致冲突/重复处理。
-          scripts/config \
-          --file out/.config \
-          --enable CONFIG_KSU \
-          --disable CONFIG_KSU_KPROBE_HOOKS
-
-          make O=out olddefconfig
-
-      - name: Check KernelSU config
-        run: |
-          grep -E "CONFIG_KSU" out/.config || true
-
-      - name: Build Kernel
-        run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-
-          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
-
-          # 用 ccache 包一层 clang，缓存编译产物。设置一个合理的
-          # 容量上限，避免缓存无限增长；CCACHE_DIR 用默认的
-          # ~/.ccache，跟上面 actions/cache 缓存的路径对应上。
-          export CCACHE_DIR="$HOME/.ccache"
-          export CCACHE_MAXSIZE=2G
-          ccache -z
-
-          make \
-            O=out \
-            ARCH=arm64 \
-            CC="ccache clang" \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            -j"$(nproc)"
-
-          echo "----- ccache stats -----"
-          ccache -s
-
-      - name: Check Kernel Output
-        run: |
-          find out/arch/arm64/boot -type f
-
-      - name: Build AnyKernel3
-        run: |
-          git clone \
-          --depth=1 \
-          https://github.com/osm0sis/AnyKernel3 \
-          AnyKernel3
-
-          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp \
-            out/arch/arm64/boot/Image.gz-dtb \
-            AnyKernel3/
-          elif [ -f out/arch/arm64/boot/Image.gz ]; then
-            cp \
-            out/arch/arm64/boot/Image.gz \
-            AnyKernel3/
-          else
-            echo "Kernel image not found!"
-            exit 1
-          fi
-
-          cd AnyKernel3
-
-          sed -i \
-          's/kernel.string=.*/kernel.string=MIX2 MSM8998 KernelSU-Next/' \
-          anykernel.sh
-
-          # 明确指定机型代号，避免模板里残留其他机型信息
-          # 导致刷机时被 anykernel.sh 的设备校验拦截。
-          sed -i 's/device.name1=.*/device.name1=chiron/' anykernel.sh
-          sed -i 's/device.name2=.*/device.name2=/' anykernel.sh
-          sed -i 's/device.name3=.*/device.name3=/' anykernel.sh
-          sed -i 's/device.name4=.*/device.name4=/' anykernel.sh
-          sed -i 's/device.name5=.*/device.name5=/' anykernel.sh
-
-          zip -r9 \
-          ../KernelSU-MIX2-chiron.zip \
-          .
-
-      - name: Upload Kernel ZIP
+      - name: Upload raw kernel image artifact
         uses: actions/upload-artifact@v4
         with:
-          name: KernelSU-MIX2-chiron
-          path: KernelSU-MIX2-chiron.zip
+          name: chiron-kernel-image-${{ github.run_number }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Fetch AnyKernel3 template
+        run: |
+          git clone --depth 1 "https://github.com/${{ github.event.inputs.anykernel_repo }}.git" AnyKernel3
+          cp workflow-repo/anykernel/anykernel.sh AnyKernel3/anykernel.sh
+
+      - name: Copy kernel image into AnyKernel3
+        run: |
+          # 优先用 Image.gz-dtb,没有就退回 Image.gz / Image
+          if [ -f dist/Image.gz-dtb ]; then
+            cp dist/Image.gz-dtb AnyKernel3/Image.gz-dtb
+          elif [ -f dist/Image.gz ]; then
+            cp dist/Image.gz AnyKernel3/Image.gz
+          else
+            cp dist/Image AnyKernel3/Image
+          fi
+
+      - name: Pack AnyKernel3 zip
+        working-directory: AnyKernel3
+        run: |
+          zip -r9 "../AnyKernel3-chiron-ksu-next-manual-${{ github.run_number }}.zip" \
+            * -x ".git*" "README.md"
+
+      - name: Upload AnyKernel3 flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3-chiron-ksu-next-manual-${{ github.run_number }}
+          path: AnyKernel3-chiron-ksu-next-manual-${{ github.run_number }}.zip
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: ${{ env.KERNEL_DIR }}/build.log
