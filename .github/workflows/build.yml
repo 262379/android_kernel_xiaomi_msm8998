@@ -71,7 +71,10 @@ jobs:
         run: |
           git diff --stat || true
           tail -n 6 "arch/arm64/configs/${{ github.event.inputs.defconfig }}"
-          
+      - name: Verify selinux_hide disabled
+        run: |
+          grep -R "selinux_hide.o" drivers/kernelsu/feature/Makefile || true
+          head -5 drivers/kernelsu/feature/selinux_hide.c          
       - name: Patch KernelSU-Next for Linux 4.4
         run: |
           python3 .github/workflows/patch_kernelsu_44.py
