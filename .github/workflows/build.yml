@@ -98,13 +98,6 @@ jobs:
                       "#include <linux/sched.h>"
                   ),
               ],
-
-              "drivers/kernelsu/feature/adb_root.c": [
-                  (
-                      "ALIGN_DOWN(stackp - sizeof(kLdPreload), 8)",
-                      "((stackp - sizeof(kLdPreload)) & ~7UL)"
-                  ),
-              ],
           }
 
           for f, patches in files.items():
@@ -118,28 +111,55 @@ jobs:
               for old, new in patches:
                   if old in text:
                       text = text.replace(old, new)
-                      print(f"Patched: {f}")
+                      print(f"Patched {f}")
                   else:
-                      print(f"Pattern not found: {f}")
+                      print(f"Pattern not found in {f}: {old}")
 
               p.write_text(text)
+
+          # adb_root.c 兼容 Linux 4.4（补 ALIGN_DOWN）
+          p = Path("drivers/kernelsu/feature/adb_root.c")
+          if p.exists():
+              text = p.read_text()
+
+              if "#define ALIGN_DOWN" not in text:
+                  macro = """
+
+      #ifndef ALIGN_DOWN
+      #define ALIGN_DOWN(x, a) ((typeof(x))((x) & ~((typeof(x))(a) - 1)))
+      #endif
+      """
+
+                  lines = text.splitlines(True)
+
+                  insert = 0
+                  for i, line in enumerate(lines):
+                      if line.startswith("#include"):
+                          insert = i + 1
+
+                  lines.insert(insert, macro)
+
+                  text = "".join(lines)
+                  p.write_text(text)
+                  print("Patched adb_root.c (ALIGN_DOWN)")
+              else:
+                  print("ALIGN_DOWN already exists")
 
           PY
 
       - name: Verify patches
         run: |
-          echo "==== ksud_integration ===="
+          echo "===== ksud_integration ====="
           grep -n "copy_to_iter" drivers/kernelsu/runtime/ksud_integration.c || true
 
-          echo "==== kernel_compat ===="
+          echo "===== kernel_compat ====="
           grep -n "kvfree" drivers/kernelsu/compat/kernel_compat.c || true
 
-          echo "==== selinux ===="
+          echo "===== selinux ====="
           grep -n "sched.h" drivers/kernelsu/selinux/rules.c || true
 
-          echo "==== adb_root ===="
+          echo "===== adb_root ====="
           grep -n "ALIGN_DOWN" drivers/kernelsu/feature/adb_root.c || true
-          grep -n "stackp - sizeof(kLdPreload)" drivers/kernelsu/feature/adb_root.c || true   
 
       - name: Build kernel
         run: |
