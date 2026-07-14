@@ -17,7 +17,7 @@ on:
         required: false
         default: "lineage-23.2"
       defconfig:
-        description: "defconfig 文件名(不含路径)"
+        description: "defconfig 名称,可以只填文件名(如 chiron_defconfig),也可以带子目录(如 vendor/chiron_defconfig),或整个 arch/arm64/configs/ 完整路径,均会自动兼容解析"
         required: false
         default: "chiron_defconfig"
       anykernel_repo:
@@ -56,6 +56,30 @@ jobs:
           path: ci-tools
           fetch-depth: 1
 
+      - name: Normalize defconfig path
+        run: |
+          raw="${{ github.event.inputs.defconfig }}"
+          # 去掉开头误填的 "./"
+          raw="${raw#./}"
+          # 兼容三种填法:
+          #   1) 纯文件名            chiron_defconfig
+          #   2) 带子目录(不含前缀)  vendor/chiron_defconfig
+          #   3) 完整路径            arch/arm64/configs/chiron_defconfig
+          # 统一去掉 "arch/arm64/configs/" 或 "arch/${ARCH}/configs/" 前缀,
+          # 只保留相对 configs 目录的部分,作为 make 的 defconfig target。
+          target="${raw#arch/arm64/configs/}"
+          target="${target#arch/${ARCH}/configs/}"
+
+          if [ -z "$target" ]; then
+            echo "::error::defconfig 输入为空,请检查 workflow_dispatch 参数"
+            exit 1
+          fi
+
+          echo "DEFCONFIG_TARGET=$target" >> "$GITHUB_ENV"
+          echo "DEFCONFIG_FILE=arch/arm64/configs/$target" >> "$GITHUB_ENV"
+          echo "解析结果: DEFCONFIG_TARGET=$target"
+          echo "解析结果: DEFCONFIG_FILE=arch/arm64/configs/$target"
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -89,12 +113,12 @@ jobs:
         run: |
           python3 ci-tools/scripts/ksu_manual_patch.py \
             . \
-            "arch/arm64/configs/${{ github.event.inputs.defconfig }}"
+            "$DEFCONFIG_FILE"
 
       - name: Show resulting patch (for CI log review)
         run: |
           git diff --stat || true
-          tail -n 6 "arch/arm64/configs/${{ github.event.inputs.defconfig }}"
+          tail -n 6 "$DEFCONFIG_FILE"
           
       - name: Patch KernelSU-Next for Linux 4.4
         run: |
@@ -151,7 +175,7 @@ jobs:
             LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=${CROSS_COMPILE} \
             CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
-            ${{ github.event.inputs.defconfig }}
+            ${DEFCONFIG_TARGET}
           make -j"$(nproc)" O=out ARCH=${ARCH} \
             LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=${CROSS_COMPILE} \
