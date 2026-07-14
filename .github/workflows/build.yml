@@ -69,23 +69,19 @@ jobs:
           # 只保留相对 configs 目录的部分,作为 make 的 defconfig target。
           target="${raw#arch/arm64/configs/}"
           target="${target#arch/${ARCH}/configs/}"
-
           if [ -z "$target" ]; then
             echo "::error::defconfig 输入为空,请检查 workflow_dispatch 参数"
             exit 1
           fi
-
           echo "DEFCONFIG_TARGET=$target" >> "$GITHUB_ENV"
           echo "DEFCONFIG_FILE=arch/arm64/configs/$target" >> "$GITHUB_ENV"
           echo "解析结果: DEFCONFIG_TARGET=$target"
           echo "解析结果: DEFCONFIG_FILE=arch/arm64/configs/$target"
-
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
           df -h
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -96,7 +92,6 @@ jobs:
             zip unzip device-tree-compiler \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
-
       - name: Fetch Proton Clang
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
@@ -108,13 +103,11 @@ jobs:
       - name: Add KernelSU-Next to kernel source tree
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-
       - name: Apply manual hook patches
         run: |
           python3 ci-tools/scripts/ksu_manual_patch.py \
             . \
             "$DEFCONFIG_FILE"
-
       - name: Show resulting patch (for CI log review)
         run: |
           git diff --stat || true
@@ -161,12 +154,13 @@ jobs:
               p.write_text(text)
               print("Patched", f)
       
-                PY
+          PY
+
       - name: Debug shell
         run: |
           ls -l /bin/sh
           grep -R "Using .. as source for kernel" -n .
-      
+          
       - name: Configure kernel
         run: |
           # 生成基础配置
@@ -192,28 +186,21 @@ jobs:
             CROSS_COMPILE=${CROSS_COMPILE} \
             CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
             2>&1 | tee build.log
-
       - name: Debug output
         run: |
           echo "===== boot ====="
           find out/arch/arm64/boot -maxdepth 2 -type f
-
           echo "===== search Image ====="
           find out -name "Image*" -print
-
           echo "===== search dtb ====="
           find out -name "*.dtb" -print
-
           echo "===== search Image.gz ====="
           find out -name "*.gz" -print
-
           echo "===== search Image.lz4 ====="
           find out -name "*.lz4" -print
-
       - name: Collect kernel image
         run: |
           mkdir -p dist
-
           if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
             echo "Using Image.gz-dtb"
             cp out/arch/arm64/boot/Image.gz-dtb dist/
@@ -228,10 +215,8 @@ jobs:
             find out -name "Image*" -print
             exit 1
           fi
-
           echo "===== dist ====="
           ls -al dist
-
       - name: Upload raw kernel image artifact
         uses: actions/upload-artifact@v4
         with:
@@ -243,7 +228,6 @@ jobs:
         run: |
           git clone --depth 1 "https://github.com/${{ github.event.inputs.anykernel_repo }}.git" AnyKernel3
           cp ci-tools/anykernel/anykernel.sh AnyKernel3/anykernel.sh
-
       - name: Copy kernel image into AnyKernel3
         run: |
           if [ -f dist/Image.gz-dtb ]; then
@@ -257,13 +241,11 @@ jobs:
             ls -al dist
             exit 1
           fi
-
       - name: Pack AnyKernel3 zip
         working-directory: AnyKernel3
         run: |
           zip -r9 "../AnyKernel3-chiron-ksu-next-manual-${{ github.run_number }}.zip" \
             * -x ".git*" "README.md"
-
       - name: Upload AnyKernel3 flashable zip
         uses: actions/upload-artifact@v4
         with:
