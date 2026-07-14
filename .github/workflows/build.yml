@@ -15,7 +15,7 @@ on:
       ksu_next_ref:
         description: "KernelSU-Next 分支/tag(setup.sh 拉取用)"
         required: false
-        default: "next"
+        default: "v3.2.0-legacy"
       anykernel_repo:
         description: "AnyKernel3 模板仓库(会用 anykernel/anykernel.sh 覆盖其中的 anykernel.sh)"
         required: false
@@ -63,7 +63,9 @@ jobs:
 
       - name: Add KernelSU-Next to kernel source tree
         run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_next_ref }}/kernel/setup.sh" | bash -s legacy
+          curl -LSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_next_ref }}/kernel/setup.sh" \
+            | bash -s "${{ github.event.inputs.ksu_next_ref }}"
 
       - name: Apply manual hook patches
         run: |
@@ -78,9 +80,34 @@ jobs:
           
       - name: Patch KernelSU-Next for Linux 4.4
         run: |
-          sed -i \
-            's/copy_to_iter(KERNEL_SU_RC/copy_to_iter((void *)KERNEL_SU_RC/' \
-            drivers/kernelsu/runtime/ksud_integration.c          
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("drivers/kernelsu/runtime/ksud_integration.c")
+      
+          if not p.exists():
+              raise SystemExit("ksud_integration.c not found!")
+      
+          s = p.read_text()
+      
+          old = "copy_to_iter(KERNEL_SU_RC + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to)"
+          new = "copy_to_iter((void *)(KERNEL_SU_RC + ksu_rc_pos), ksu_rc_len - ksu_rc_pos, to)"
+      
+          if old in s:
+              s = s.replace(old, new)
+              p.write_text(s)
+              print("Patch applied successfully.")
+          else:
+              print("Target code not found, current copy_to_iter lines:")
+              for i, line in enumerate(s.splitlines(), 1):
+                  if "copy_to_iter" in line:
+                      print(f"{i}: {line}")
+              raise SystemExit("Patch failed!")
+          PY
+      
+      - name: Verify KernelSU patch
+        run: |
+          echo "===== copy_to_iter ====="
+          grep -n "copy_to_iter" drivers/kernelsu/runtime/ksud_integration.c      
 
       - name: Build kernel
         run: |
