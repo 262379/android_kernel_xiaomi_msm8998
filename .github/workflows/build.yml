@@ -1,16 +1,13 @@
 name: Build chiron kernel (KernelSU-Next manual hook)
 
+# 本 workflow 假定放在你 fork 的
+# LineageOS/android_kernel_xiaomi_msm8998 仓库里的 .github/workflows/ 下,
+# 直接对 checkout 出来的这份内核源码打补丁 + 编译,不再单独克隆一次内核仓库。
+# 在 Actions 页手动触发时,右上角分支下拉框选你要编译的分支(比如 lineage-22.2)。
+
 on:
   workflow_dispatch:
     inputs:
-      kernel_repo:
-        description: "内核源码仓库"
-        required: false
-        default: "LineageOS/android_kernel_xiaomi_msm8998"
-      kernel_branch:
-        description: "内核源码分支"
-        required: false
-        default: "lineage-22.2"
       defconfig:
         description: "defconfig 文件名(不含路径)"
         required: false
@@ -25,7 +22,6 @@ on:
         default: "osm0sis/AnyKernel3"
 
 env:
-  KERNEL_DIR: kernel_src
   ARCH: arm64
   # 64-bit / 32-bit(compat vDSO)交叉工具链前缀,配合 LLVM=1 使用
   CROSS_COMPILE: aarch64-linux-gnu-
@@ -35,17 +31,9 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout workflow/scripts repo
+      - name: Checkout kernel source (this fork)
         uses: actions/checkout@v4
         with:
-          path: workflow-repo
-
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.inputs.kernel_repo }}
-          ref: ${{ github.event.inputs.kernel_branch }}
-          path: ${{ env.KERNEL_DIR }}
           fetch-depth: 1
 
       - name: Free disk space
@@ -65,38 +53,43 @@ jobs:
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-      # Clang: 官方 AOSP 预编译工具链(克隆一个较小的稳定 tag,避免整个仓库历史)
-      - name: Fetch Clang toolchain
+      - name: Fetch Neutron Clang
         run: |
           mkdir -p clang
-          curl -L -o clang.tar.gz \
-            "https://github.com/greenforce-project/greenforce_clang/releases/latest/download/greenforce-clang.tar.gz" \
-            || curl -L -o clang.tar.gz \
-            "https://github.com/ZyCromerZ/Clang/releases/latest/download/Clang-latest.tar.gz"
-          tar -xf clang.tar.gz -C clang
+      
+          URL=$(curl -s https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest \
+            | grep browser_download_url \
+            | grep linux-x86_64.tar.zst \
+            | head -n1 \
+            | cut -d '"' -f4)
+      
+          echo "Downloading $URL"
+      
+          curl -fL "$URL" -o clang.tar.zst
+      
+          tar --zstd -xf clang.tar.zst -C clang --strip-components=1
+      
           echo "$PWD/clang/bin" >> "$GITHUB_PATH"
+      
+          clang --version
 
       - name: Add KernelSU-Next to kernel source tree
-        working-directory: ${{ env.KERNEL_DIR }}
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_next_ref }}/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_next_ref }}"
 
       - name: Apply manual hook patches
         run: |
-          python3 workflow-repo/scripts/ksu_manual_patch.py \
-            "${KERNEL_DIR}" \
-            "${KERNEL_DIR}/arch/arm64/configs/${{ github.event.inputs.defconfig }}"
+          python3 scripts/ksu_manual_patch.py \
+            . \
+            "arch/arm64/configs/${{ github.event.inputs.defconfig }}"
 
       - name: Show resulting patch (for CI log review)
-        working-directory: ${{ env.KERNEL_DIR }}
         run: |
           git diff --stat || true
           tail -n 6 "arch/arm64/configs/${{ github.event.inputs.defconfig }}"
 
       - name: Build kernel
-        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          export PATH="$PWD/../clang/bin:$PATH"
           make -j"$(nproc)" O=out ARCH=${ARCH} \
             LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=${CROSS_COMPILE} \
@@ -109,14 +102,13 @@ jobs:
             2>&1 | tee build.log
 
       - name: Locate build output
-        working-directory: ${{ env.KERNEL_DIR }}
         run: |
           find out/arch/arm64/boot -maxdepth 1 -type f \( -name "Image*" -o -name "*.dtb" \) -print
-          mkdir -p ../dist
-          cp out/arch/arm64/boot/Image.gz-dtb ../dist/ 2>/dev/null || true
-          cp out/arch/arm64/boot/Image.gz ../dist/ 2>/dev/null || true
-          cp out/arch/arm64/boot/Image ../dist/ 2>/dev/null || true
-          ls ../dist
+          mkdir -p dist
+          cp out/arch/arm64/boot/Image.gz-dtb dist/ 2>/dev/null || true
+          cp out/arch/arm64/boot/Image.gz dist/ 2>/dev/null || true
+          cp out/arch/arm64/boot/Image dist/ 2>/dev/null || true
+          ls dist
 
       - name: Upload raw kernel image artifact
         uses: actions/upload-artifact@v4
@@ -128,7 +120,7 @@ jobs:
       - name: Fetch AnyKernel3 template
         run: |
           git clone --depth 1 "https://github.com/${{ github.event.inputs.anykernel_repo }}.git" AnyKernel3
-          cp workflow-repo/anykernel/anykernel.sh AnyKernel3/anykernel.sh
+          cp anykernel/anykernel.sh AnyKernel3/anykernel.sh
 
       - name: Copy kernel image into AnyKernel3
         run: |
@@ -159,4 +151,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ github.run_number }}
-          path: ${{ env.KERNEL_DIR }}/build.log
+          path: build.log
