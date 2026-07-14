@@ -53,21 +53,9 @@ jobs:
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-      - name: Fetch Neutron Clang
+      - name: Fetch Proton Clang
         run: |
-          mkdir -p clang
-      
-          URL=$(curl -s https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest \
-            | grep browser_download_url \
-            | grep linux-x86_64.tar.zst \
-            | head -n1 \
-            | cut -d '"' -f4)
-      
-          echo "Downloading $URL"
-      
-          curl -fL "$URL" -o clang.tar.zst
-      
-          tar --zstd -xf clang.tar.zst -C clang --strip-components=1
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
       
           echo "$PWD/clang/bin" >> "$GITHUB_PATH"
       
