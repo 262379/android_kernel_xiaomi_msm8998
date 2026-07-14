@@ -74,92 +74,15 @@ jobs:
           
       - name: Patch KernelSU-Next for Linux 4.4
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          files = {
-              "drivers/kernelsu/runtime/ksud_integration.c": [
-                  (
-                      "copy_to_iter(KERNEL_SU_RC + ksu_rc_pos,",
-                      "copy_to_iter((void *)(KERNEL_SU_RC + ksu_rc_pos),"
-                  ),
-              ],
-
-              "drivers/kernelsu/compat/kernel_compat.c": [
-                  (
-                      "kvfree(p);",
-                      "kvfree((void *)p);"
-                  ),
-              ],
-
-              "drivers/kernelsu/selinux/rules.c": [
-                  (
-                      "#include <uapi/linux/sched/types.h>",
-                      "#include <linux/sched.h>"
-                  ),
-              ],
-          }
-
-          for f, patches in files.items():
-              p = Path(f)
-              if not p.exists():
-                  print("Skip", f)
-                  continue
-
-              text = p.read_text()
-
-              for old, new in patches:
-                  if old in text:
-                      text = text.replace(old, new)
-                      print(f"Patched {f}")
-                  else:
-                      print(f"Pattern not found in {f}: {old}")
-
-              p.write_text(text)
-
-          # adb_root.c 兼容 Linux 4.4（补 ALIGN_DOWN）
-          p = Path("drivers/kernelsu/feature/adb_root.c")
-          if p.exists():
-              text = p.read_text()
-
-              if "#define ALIGN_DOWN" not in text:
-                  macro = """
-
-          #ifndef ALIGN_DOWN
-          #define ALIGN_DOWN(x, a) ((typeof(x))((x) & ~((typeof(x))(a) - 1)))
-          #endif
-          """
-
-                      lines = text.splitlines(True)
-
-                      insert = 0
-                      for i, line in enumerate(lines):
-                          if line.startswith("#include"):
-                              insert = i + 1
-
-                      lines.insert(insert, macro)
-
-                      text = "".join(lines)
-                      p.write_text(text)
-                      print("Patched adb_root.c (ALIGN_DOWN)")
-                  else:
-                      print("ALIGN_DOWN already exists")
-
-              PY
+          python3 .github/workflows/patch_kernelsu_44.py
 
       - name: Verify patches
         run: |
-          echo "===== ksud_integration ====="
           grep -n "copy_to_iter" drivers/kernelsu/runtime/ksud_integration.c || true
-
-          echo "===== kernel_compat ====="
           grep -n "kvfree" drivers/kernelsu/compat/kernel_compat.c || true
-
-          echo "===== selinux ====="
           grep -n "sched.h" drivers/kernelsu/selinux/rules.c || true
-
-          echo "===== adb_root ====="
           grep -n "ALIGN_DOWN" drivers/kernelsu/feature/adb_root.c || true
+          grep -n "file_operations" drivers/kernelsu/core/sucompat.c || true   
 
       - name: Build kernel
         run: |
