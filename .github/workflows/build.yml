@@ -96,22 +96,36 @@ jobs:
                       "kvfree((void *)p);"
                   ),
               ],
+              "drivers/kernelsu/selinux/rules.c": [
+                  (
+                      "#include <uapi/linux/sched/types.h>",
+                      "#include <linux/sched.h>"
+                  ),
+              ],
           }
       
           for f, patches in files.items():
               p = Path(f)
+              if not p.exists():
+                  print("Skip", f)
+                  continue
+      
               text = p.read_text()
+      
               for old, new in patches:
                   if old in text:
                       text = text.replace(old, new)
+      
               p.write_text(text)
               print("Patched", f)
+      
           PY
       
-      - name: Verify KernelSU patch
+      - name: Verify patches
         run: |
-          echo "===== copy_to_iter ====="
-          grep -n "copy_to_iter" drivers/kernelsu/runtime/ksud_integration.c      
+          grep -n "copy_to_iter" drivers/kernelsu/runtime/ksud_integration.c
+          grep -n "kvfree" drivers/kernelsu/compat/kernel_compat.c
+          grep -n "sched.h" drivers/kernelsu/selinux/rules.c     
 
       - name: Build kernel
         run: |
