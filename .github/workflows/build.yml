@@ -82,26 +82,30 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("drivers/kernelsu/runtime/ksud_integration.c")
       
-          if not p.exists():
-              raise SystemExit("ksud_integration.c not found!")
+          files = {
+              "drivers/kernelsu/runtime/ksud_integration.c": [
+                  (
+                      "copy_to_iter(KERNEL_SU_RC + ksu_rc_pos,",
+                      "copy_to_iter((void *)(KERNEL_SU_RC + ksu_rc_pos),"
+                  ),
+              ],
+              "drivers/kernelsu/compat/kernel_compat.c": [
+                  (
+                      "kvfree(p);",
+                      "kvfree((void *)p);"
+                  ),
+              ],
+          }
       
-          s = p.read_text()
-      
-          old = "copy_to_iter(KERNEL_SU_RC + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to)"
-          new = "copy_to_iter((void *)(KERNEL_SU_RC + ksu_rc_pos), ksu_rc_len - ksu_rc_pos, to)"
-      
-          if old in s:
-              s = s.replace(old, new)
-              p.write_text(s)
-              print("Patch applied successfully.")
-          else:
-              print("Target code not found, current copy_to_iter lines:")
-              for i, line in enumerate(s.splitlines(), 1):
-                  if "copy_to_iter" in line:
-                      print(f"{i}: {line}")
-              raise SystemExit("Patch failed!")
+          for f, patches in files.items():
+              p = Path(f)
+              text = p.read_text()
+              for old, new in patches:
+                  if old in text:
+                      text = text.replace(old, new)
+              p.write_text(text)
+              print("Patched", f)
           PY
       
       - name: Verify KernelSU patch
