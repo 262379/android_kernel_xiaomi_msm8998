@@ -11,7 +11,7 @@ on:
       kernel_repo:
         description: "内核源码仓库(owner/repo),留空则使用当前 workflow 所在仓库"
         required: false
-        default: "https://github.com/xiaomi-msm8998-devs/android_kernel_xiaomi_msm8998"
+        default: "xiaomi-msm8998-devs/android_kernel_xiaomi_msm8998"
       kernel_branch:
         description: "内核源码分支/tag/commit,留空则使用当前触发所在分支"
         required: false
