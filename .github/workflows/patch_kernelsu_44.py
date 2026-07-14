@@ -117,20 +117,33 @@ if p.exists():
 print("KernelSU Linux 4.4 compatibility patches applied.")
 
 # Disable selinux_hide for Linux 4.4
-p = Path("drivers/kernelsu/feature/selinux_hide.c")
-if p.exists():
-    text = p.read_text()
-    if not text.startswith("#if 0"):
-        text = "#if 0\n" + text + "\n#endif\n"
-        p.write_text(text)
-        print("Disabled selinux_hide.c")
 
+# 不编译
 p = Path("drivers/kernelsu/feature/Makefile")
 if p.exists():
     text = p.read_text()
+
     text = text.replace(
         "obj-y += selinux_hide.o",
         "# obj-y += selinux_hide.o"
     )
+
     p.write_text(text)
     print("Disabled selinux_hide.o")
+
+# 提供空实现
+p = Path("drivers/kernelsu/feature/selinux_hide.h")
+if p.exists():
+    p.write_text("""#pragma once
+
+static inline int ksu_selinux_hide_init(void)
+{
+    return 0;
+}
+
+static inline void ksu_selinux_hide_exit(void)
+{
+}
+
+""")
+    print("Patched selinux_hide.h")
