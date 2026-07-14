@@ -144,18 +144,40 @@ jobs:
         run: |
           echo "===== boot ====="
           find out/arch/arm64/boot -maxdepth 2 -type f
-      
+
           echo "===== search Image ====="
           find out -name "Image*" -print
-      
+
           echo "===== search dtb ====="
           find out -name "*.dtb" -print
-      
+
           echo "===== search Image.gz ====="
           find out -name "*.gz" -print
-      
+
           echo "===== search Image.lz4 ====="
           find out -name "*.lz4" -print
+
+      - name: Collect kernel image
+        run: |
+          mkdir -p dist
+
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            echo "Using Image.gz-dtb"
+            cp out/arch/arm64/boot/Image.gz-dtb dist/
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+            echo "Using Image.gz"
+            cp out/arch/arm64/boot/Image.gz dist/
+          elif [ -f out/arch/arm64/boot/Image ]; then
+            echo "Using Image"
+            cp out/arch/arm64/boot/Image dist/
+          else
+            echo "Kernel image not found!"
+            find out -name "Image*" -print
+            exit 1
+          fi
+
+          echo "===== dist ====="
+          ls -al dist
 
       - name: Upload raw kernel image artifact
         uses: actions/upload-artifact@v4
@@ -171,13 +193,16 @@ jobs:
 
       - name: Copy kernel image into AnyKernel3
         run: |
-          # 优先用 Image.gz-dtb,没有就退回 Image.gz / Image
           if [ -f dist/Image.gz-dtb ]; then
             cp dist/Image.gz-dtb AnyKernel3/Image.gz-dtb
           elif [ -f dist/Image.gz ]; then
             cp dist/Image.gz AnyKernel3/Image.gz
-          else
+          elif [ -f dist/Image ]; then
             cp dist/Image AnyKernel3/Image
+          else
+            echo "No kernel image found in dist!"
+            ls -al dist
+            exit 1
           fi
 
       - name: Pack AnyKernel3 zip
