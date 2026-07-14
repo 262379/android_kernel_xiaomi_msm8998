@@ -125,27 +125,27 @@ jobs:
               if "#define ALIGN_DOWN" not in text:
                   macro = """
 
-      #ifndef ALIGN_DOWN
-      #define ALIGN_DOWN(x, a) ((typeof(x))((x) & ~((typeof(x))(a) - 1)))
-      #endif
-      """
+          #ifndef ALIGN_DOWN
+          #define ALIGN_DOWN(x, a) ((typeof(x))((x) & ~((typeof(x))(a) - 1)))
+          #endif
+          """
 
-                  lines = text.splitlines(True)
+                      lines = text.splitlines(True)
 
-                  insert = 0
-                  for i, line in enumerate(lines):
-                      if line.startswith("#include"):
-                          insert = i + 1
+                      insert = 0
+                      for i, line in enumerate(lines):
+                          if line.startswith("#include"):
+                              insert = i + 1
 
-                  lines.insert(insert, macro)
+                      lines.insert(insert, macro)
 
-                  text = "".join(lines)
-                  p.write_text(text)
-                  print("Patched adb_root.c (ALIGN_DOWN)")
-              else:
-                  print("ALIGN_DOWN already exists")
+                      text = "".join(lines)
+                      p.write_text(text)
+                      print("Patched adb_root.c (ALIGN_DOWN)")
+                  else:
+                      print("ALIGN_DOWN already exists")
 
-          PY
+              PY
 
       - name: Verify patches
         run: |
