@@ -120,18 +120,25 @@ print("KernelSU Linux 4.4 compatibility patches applied.")
 # Disable selinux_hide for Linux 4.4
 # ----------------------------------------------------------
 
-# 不编译 selinux_hide.o
+# Disable selinux_hide.c for Linux 4.4
+
 p = Path("drivers/kernelsu/feature/Makefile")
+
 if p.exists():
-    text = p.read_text()
 
-    text = text.replace(
-        "obj-y += selinux_hide.o",
-        "# obj-y += selinux_hide.o"
-    )
+    lines = p.read_text().splitlines()
 
-    p.write_text(text)
-    print("Disabled selinux_hide.o")
+    new_lines = []
+
+    for line in lines:
+        if "selinux_hide.o" in line:
+            new_lines.append("# " + line)
+            print("Disabled:", line)
+        else:
+            new_lines.append(line)
+
+    p.write_text("\n".join(new_lines) + "\n")
+
 
 # hook_manager.h 提供空实现，避免链接错误
 p = Path("drivers/kernelsu/hook/hook_manager.h")
@@ -156,3 +163,21 @@ if p.exists():
 
     p.write_text(text)
     print("Patched hook_manager.h")
+
+# Backup disable selinux_hide.c
+
+p = Path("drivers/kernelsu/feature/selinux_hide.c")
+
+if p.exists():
+
+    text = p.read_text()
+
+    if not text.startswith("#if 0"):
+
+        p.write_text(
+            "#if 0\n" +
+            text +
+            "\n#endif\n"
+        )
+
+        print("Disabled selinux_hide.c")
