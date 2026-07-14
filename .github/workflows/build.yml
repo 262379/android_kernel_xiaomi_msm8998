@@ -163,26 +163,26 @@ jobs:
       
           PY
       
-      - name: Verify patches
+      - name: Configure kernel
         run: |
-          grep -n "copy_to_iter" drivers/kernelsu/runtime/ksud_integration.c
-          grep -n "kvfree" drivers/kernelsu/compat/kernel_compat.c
-          grep -n "sched.h" drivers/kernelsu/selinux/rules.c     
-      - name: Check merge_config
-        run: |
-          find scripts -name merge_config.sh
-
-      - name: Show build.sh
-        run: |
-          find . -maxdepth 2 -name "build*.sh"          
-
-      - name: Build kernel
-        run: |
-          make -j"$(nproc)" O=out ARCH=${ARCH} \
+          # 生成基础配置
+          make O=out ARCH=${ARCH} \
             LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=${CROSS_COMPILE} \
             CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
-            ${DEFCONFIG_TARGET}
+            vendor/xiaomi/mi8998_defconfig
+      
+          # 合并设备配置
+          ARCH=${ARCH} \
+          scripts/kconfig/merge_config.sh \
+            -m \
+            out/.config \
+            arch/arm64/configs/vendor/xiaomi/chiron.config
+      
+          # 补全默认配置
+          make O=out ARCH=${ARCH} olddefconfig         
+      - name: Build kernel
+        run: |
           make -j"$(nproc)" O=out ARCH=${ARCH} \
             LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=${CROSS_COMPILE} \
