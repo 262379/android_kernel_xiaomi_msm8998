@@ -63,7 +63,7 @@ jobs:
 
       - name: Add KernelSU-Next to kernel source tree
         run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_next_ref }}/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_next_ref }}"
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_next_ref }}/kernel/setup.sh" | bash -s legacy
 
       - name: Apply manual hook patches
         run: |
