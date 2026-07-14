@@ -12,10 +12,6 @@ on:
         description: "defconfig 文件名(不含路径)"
         required: false
         default: "chiron_defconfig"
-      ksu_next_ref:
-        description: "KernelSU-Next 分支/tag(setup.sh 拉取用)"
-        required: false
-        default: "v3.2.0-legacy"
       anykernel_repo:
         description: "AnyKernel3 模板仓库(会用 anykernel/anykernel.sh 覆盖其中的 anykernel.sh)"
         required: false
@@ -63,9 +59,7 @@ jobs:
 
       - name: Add KernelSU-Next to kernel source tree
         run: |
-          curl -LSs \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_next_ref }}/kernel/setup.sh" \
-            | bash -s "${{ github.event.inputs.ksu_next_ref }}"
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
       - name: Apply manual hook patches
         run: |
