@@ -89,14 +89,22 @@ jobs:
             CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
             2>&1 | tee build.log
 
-      - name: Locate build output
+      - name: Debug output
         run: |
-          find out/arch/arm64/boot -maxdepth 1 -type f \( -name "Image*" -o -name "*.dtb" \) -print
-          mkdir -p dist
-          cp out/arch/arm64/boot/Image.gz-dtb dist/ 2>/dev/null || true
-          cp out/arch/arm64/boot/Image.gz dist/ 2>/dev/null || true
-          cp out/arch/arm64/boot/Image dist/ 2>/dev/null || true
-          ls dist
+          echo "===== boot ====="
+          find out/arch/arm64/boot -maxdepth 2 -type f
+      
+          echo "===== search Image ====="
+          find out -name "Image*" -print
+      
+          echo "===== search dtb ====="
+          find out -name "*.dtb" -print
+      
+          echo "===== search Image.gz ====="
+          find out -name "*.gz" -print
+      
+          echo "===== search Image.lz4 ====="
+          find out -name "*.lz4" -print
 
       - name: Upload raw kernel image artifact
         uses: actions/upload-artifact@v4
