@@ -75,6 +75,12 @@ jobs:
         run: |
           git diff --stat || true
           tail -n 6 "arch/arm64/configs/${{ github.event.inputs.defconfig }}"
+          
+      - name: Patch KernelSU-Next for Linux 4.4
+        run: |
+          sed -i \
+            's/copy_to_iter(KERNEL_SU_RC/copy_to_iter((void *)KERNEL_SU_RC/' \
+            drivers/kernelsu/runtime/ksud_integration.c          
 
       - name: Build kernel
         run: |
