@@ -45,6 +45,17 @@ jobs:
           ref: ${{ github.event.inputs.kernel_branch != '' && github.event.inputs.kernel_branch || github.ref }}
           fetch-depth: 1
 
+      - name: "Checkout CI tools (this workflow's own repo: scripts/ + anykernel/)"
+        uses: actions/checkout@v4
+        with:
+          # 无论 kernel_repo 填的是哪个仓库,scripts/ksu_manual_patch.py 和
+          # anykernel/anykernel.sh 始终来自当前 workflow 所在的这个仓库,
+          # 所以单独 checkout 到 ci-tools/ 子目录,不与内核源码混在一起。
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: ci-tools
+          fetch-depth: 1
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -76,7 +87,7 @@ jobs:
 
       - name: Apply manual hook patches
         run: |
-          python3 scripts/ksu_manual_patch.py \
+          python3 ci-tools/scripts/ksu_manual_patch.py \
             . \
             "arch/arm64/configs/${{ github.event.inputs.defconfig }}"
 
@@ -196,7 +207,7 @@ jobs:
       - name: Fetch AnyKernel3 template
         run: |
           git clone --depth 1 "https://github.com/${{ github.event.inputs.anykernel_repo }}.git" AnyKernel3
-          cp anykernel/anykernel.sh AnyKernel3/anykernel.sh
+          cp ci-tools/anykernel/anykernel.sh AnyKernel3/anykernel.sh
 
       - name: Copy kernel image into AnyKernel3
         run: |
