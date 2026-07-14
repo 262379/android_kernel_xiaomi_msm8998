@@ -168,6 +168,19 @@ jobs:
           grep -n "copy_to_iter" drivers/kernelsu/runtime/ksud_integration.c
           grep -n "kvfree" drivers/kernelsu/compat/kernel_compat.c
           grep -n "sched.h" drivers/kernelsu/selinux/rules.c     
+      - name: Check kernel config targets
+        run: |
+          echo "===== Makefile ====="
+          grep -n "defconfig" arch/arm64/configs/Makefile || true
+      
+          echo "===== build.config ====="
+          find . -maxdepth 2 -name "build.config*" -print
+      
+          echo "===== chiron ====="
+          find arch/arm64/configs -name "*chiron*"
+      
+          echo "===== vendor configs ====="
+          find arch/arm64/configs/vendor -type f
 
       - name: Build kernel
         run: |
