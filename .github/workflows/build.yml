@@ -161,7 +161,11 @@ jobs:
               p.write_text(text)
               print("Patched", f)
       
-          PY
+                PY
+      - name: Debug shell
+        run: |
+          ls -l /bin/sh
+          grep -R "Using .. as source for kernel" -n .
       
       - name: Configure kernel
         run: |
