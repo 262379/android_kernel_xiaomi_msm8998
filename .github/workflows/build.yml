@@ -106,20 +106,17 @@ jobs:
           
       - name: Configure kernel
         run: |
-          # 生成基础配置
+          # 仓库里 chiron_defconfig 本身就是完整 defconfig,不存在
+          # vendor/xiaomi/mi8998_defconfig 这个 base 或 vendor/xiaomi/chiron.config
+          # 这个 fragment,所以直接用前面 Normalize 步骤算出来的 $DEFCONFIG_TARGET,
+          # 不再走 base+merge 的两步流程。
+          echo "使用 defconfig: $DEFCONFIG_TARGET"
           make O=out ARCH=${ARCH} \
             LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=${CROSS_COMPILE} \
             CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
-            vendor/xiaomi/mi8998_defconfig
-      
-          # 合并设备配置
-          ARCH=${ARCH} \
-          scripts/kconfig/merge_config.sh \
-            -m \
-            out/.config \
-            arch/arm64/configs/vendor/xiaomi/chiron.config
-      
+            "$DEFCONFIG_TARGET"
+
           # 补全默认配置
           make O=out ARCH=${ARCH} olddefconfig
 
