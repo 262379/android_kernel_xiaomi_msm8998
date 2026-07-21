@@ -122,9 +122,6 @@ jobs:
 
       - name: Enable CONFIG_KALLSYMS support
         run: |
-          echo "===== KALLSYMS_ALL 在源码中的实际依赖 ====="
-          grep -R "config KALLSYMS_ALL" -A 3 kernel/Kconfig.debug || true
-
           # CONFIG_KALLSYMS_ALL 通常 depends on DEBUG_KERNEL && KALLSYMS,
           # 所以必须一并打开 CONFIG_DEBUG_KERNEL,否则 olddefconfig 会静默把它退回未设置。
           ./scripts/config --file out/.config \
@@ -137,7 +134,7 @@ jobs:
           echo "===== 校验 KALLSYMS 配置 ====="
           grep -E "^CONFIG_(KALLSYMS(_ALL)?|DEBUG_KERNEL)=" out/.config
           if ! grep -q "^CONFIG_KALLSYMS_ALL=y" out/.config; then
-            echo "::error::CONFIG_KALLSYMS_ALL 仍未生效,请查看上面打印的 Kconfig 依赖,可能还有其他未满足的 depends on"
+            echo "::error::CONFIG_KALLSYMS_ALL 仍未生效,可能还有其他未满足的 depends on,请检查 kernel/Kconfig.debug 中 KALLSYMS_ALL 的实际依赖"
             exit 1
           fi
 
@@ -184,6 +181,60 @@ jobs:
         with:
           name: chiron-kernel-image-${{ github.run_number }}
           path: dist/*
+          if-no-files-found: error
+
+      - name: Fetch mkbootimg tools
+        run: |
+          # 用官方 AOSP 的纯 Python 版 unpack_bootimg.py / mkbootimg.py,
+          # 避免依赖某个第三方预编译 magiskboot 二进制的架构/来源问题。
+          git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg-tools
+
+      - name: Repack boot.img with new kernel
+        run: |
+          BASE_BOOT_IMG="ci-tools/.github/workflows/boot.img"
+          if [ ! -f "$BASE_BOOT_IMG" ]; then
+            echo "::error::找不到底包 $BASE_BOOT_IMG,请确认已放在 .github/workflows/boot.img"
+            exit 1
+          fi
+
+          # 找到刚编译出来的内核镜像(与 Collect kernel image 步骤同样的优先级)
+          if [ -f dist/Image.gz-dtb ]; then
+            NEW_KERNEL="dist/Image.gz-dtb"
+          elif [ -f dist/Image.gz ]; then
+            NEW_KERNEL="dist/Image.gz"
+          elif [ -f dist/Image ]; then
+            NEW_KERNEL="dist/Image"
+          else
+            echo "::error::dist/ 下找不到编译好的内核镜像"
+            exit 1
+          fi
+          echo "使用内核: $NEW_KERNEL"
+
+          mkdir -p unpacked
+          # --format=mkbootimg 会把底包的 header 信息(cmdline/base/pagesize/
+          # os_version/header_version 等)还原成一串可以直接喂给 mkbootimg.py
+          # 的参数,这样只需要把里面指向旧内核的部分换成新内核即可,其余
+          # (ramdisk、dtb、cmdline 等)全部原样保留。
+          python3 mkbootimg-tools/unpack_bootimg.py \
+            --boot_img "$BASE_BOOT_IMG" \
+            --out unpacked \
+            --format=mkbootimg > mkbootimg_args.txt
+          echo "===== 底包解析出的 mkbootimg 参数 ====="
+          cat mkbootimg_args.txt
+
+          # 把参数里指向旧内核(unpacked/kernel)的部分替换成新编译的内核
+          sed -i "s#--kernel [^ ]*#--kernel $NEW_KERNEL#" mkbootimg_args.txt
+
+          eval "python3 mkbootimg-tools/mkbootimg.py $(cat mkbootimg_args.txt) --output dist/boot.img"
+
+          echo "===== dist ====="
+          ls -al dist
+
+      - name: Upload boot.img artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chiron-boot-img-${{ github.run_number }}
+          path: dist/boot.img
           if-no-files-found: error
 
       - name: Fetch AnyKernel3 template
