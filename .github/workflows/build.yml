@@ -1,4 +1,4 @@
-name: Build chiron kernel (KernelSU-Next manual hook)
+name: Build chiron kernel
 
 # 本 workflow 假定放在你 fork 的
 # LineageOS/android_kernel_xiaomi_msm8998 仓库里的 .github/workflows/ 下,
@@ -8,8 +8,16 @@ name: Build chiron kernel (KernelSU-Next manual hook)
 on:
   workflow_dispatch:
     inputs:
+      kernel_repo:
+        description: "内核源码仓库(owner/repo),留空则使用当前 workflow 所在仓库"
+        required: false
+        default: ""
+      kernel_branch:
+        description: "内核源码分支/tag/commit,留空则使用当前触发所在分支"
+        required: false
+        default: ""
       defconfig:
-        description: "defconfig 文件名(不含路径)"
+        description: "defconfig 名称,可以只填文件名(如 chiron_defconfig),也可以带子目录(如 vendor/chiron_defconfig),或整个 arch/arm64/configs/ 完整路径,均会自动兼容解析"
         required: false
         default: "chiron_defconfig"
       anykernel_repo:
@@ -27,17 +35,52 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout kernel source (this fork)
+      - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
+          # 留空 kernel_repo/kernel_branch 时,回退到当前仓库 + 当前触发分支
+          # (即原来 "checkout this fork" 的行为);填了则拉取指定仓库的指定分支/tag/commit。
+          # 注意:若目标仓库为私有仓库,需要额外配置有权限的 token(此处未处理)。
+          repository: ${{ github.event.inputs.kernel_repo != '' && github.event.inputs.kernel_repo || github.repository }}
+          ref: ${{ github.event.inputs.kernel_branch != '' && github.event.inputs.kernel_branch || github.ref }}
           fetch-depth: 1
 
+      - name: "Checkout CI tools (this workflow's own repo: anykernel/)"
+        uses: actions/checkout@v4
+        with:
+          # anykernel/anykernel.sh 始终来自当前 workflow 所在的这个仓库,
+          # 所以单独 checkout 到 ci-tools/ 子目录,不与内核源码混在一起。
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: ci-tools
+          fetch-depth: 1
+
+      - name: Normalize defconfig path
+        run: |
+          raw="${{ github.event.inputs.defconfig }}"
+          # 去掉开头误填的 "./"
+          raw="${raw#./}"
+          # 兼容三种填法:
+          #   1) 纯文件名            chiron_defconfig
+          #   2) 带子目录(不含前缀)  vendor/chiron_defconfig
+          #   3) 完整路径            arch/arm64/configs/chiron_defconfig
+          # 统一去掉 "arch/arm64/configs/" 或 "arch/${ARCH}/configs/" 前缀,
+          # 只保留相对 configs 目录的部分,作为 make 的 defconfig target。
+          target="${raw#arch/arm64/configs/}"
+          target="${target#arch/${ARCH}/configs/}"
+          if [ -z "$target" ]; then
+            echo "::error::defconfig 输入为空,请检查 workflow_dispatch 参数"
+            exit 1
+          fi
+          echo "DEFCONFIG_TARGET=$target" >> "$GITHUB_ENV"
+          echo "DEFCONFIG_FILE=arch/arm64/configs/$target" >> "$GITHUB_ENV"
+          echo "解析结果: DEFCONFIG_TARGET=$target"
+          echo "解析结果: DEFCONFIG_FILE=arch/arm64/configs/$target"
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
           df -h
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -48,7 +91,6 @@ jobs:
             zip unzip device-tree-compiler \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
-
       - name: Fetch Proton Clang
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
@@ -57,32 +99,50 @@ jobs:
       
           clang --version
 
-      - name: Add KernelSU-Next to kernel source tree
+      - name: Debug shell
         run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-
-      - name: Apply manual hook patches
-        run: |
-          python3 scripts/ksu_manual_patch.py \
-            . \
-            "arch/arm64/configs/${{ github.event.inputs.defconfig }}"
-
-      - name: Show resulting patch (for CI log review)
-        run: |
-          git diff --stat || true
-          tail -n 6 "arch/arm64/configs/${{ github.event.inputs.defconfig }}"
+          ls -l /bin/sh
+          grep -R "Using .. as source for kernel" -n .
           
-      - name: Patch KernelSU-Next for Linux 4.4
+      - name: Configure kernel
         run: |
-          python3 .github/workflows/patch_kernelsu_44.py
+          # 生成基础配置
+          make O=out ARCH=${ARCH} \
+            LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=${CROSS_COMPILE} \
+            CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
+            vendor/xiaomi/mi8998_defconfig
+      
+          # 合并设备配置
+          ARCH=${ARCH} \
+          scripts/kconfig/merge_config.sh \
+            -m \
+            out/.config \
+            arch/arm64/configs/vendor/xiaomi/chiron.config
+      
+          # 补全默认配置
+          make O=out ARCH=${ARCH} olddefconfig
 
-      - name: Verify patches
+      - name: Enable CONFIG_KALLSYMS support
         run: |
-          grep -n "copy_to_iter" drivers/kernelsu/runtime/ksud_integration.c || true
-          grep -n "kvfree" drivers/kernelsu/compat/kernel_compat.c || true
-          grep -n "sched.h" drivers/kernelsu/selinux/rules.c || true
-          grep -n "ALIGN_DOWN" drivers/kernelsu/feature/adb_root.c || true
-          grep -n "file_operations" drivers/kernelsu/core/sucompat.c || true   
+          echo "===== KALLSYMS_ALL 在源码中的实际依赖 ====="
+          grep -R "config KALLSYMS_ALL" -A 3 kernel/Kconfig.debug || true
+
+          # CONFIG_KALLSYMS_ALL 通常 depends on DEBUG_KERNEL && KALLSYMS,
+          # 所以必须一并打开 CONFIG_DEBUG_KERNEL,否则 olddefconfig 会静默把它退回未设置。
+          ./scripts/config --file out/.config \
+            --enable CONFIG_KALLSYMS \
+            --enable CONFIG_DEBUG_KERNEL \
+            --enable CONFIG_KALLSYMS_ALL
+
+          make O=out ARCH=${ARCH} olddefconfig
+
+          echo "===== 校验 KALLSYMS 配置 ====="
+          grep -E "^CONFIG_(KALLSYMS(_ALL)?|DEBUG_KERNEL)=" out/.config
+          if ! grep -q "^CONFIG_KALLSYMS_ALL=y" out/.config; then
+            echo "::error::CONFIG_KALLSYMS_ALL 仍未生效,请查看上面打印的 Kconfig 依赖,可能还有其他未满足的 depends on"
+            exit 1
+          fi
 
       - name: Build kernel
         run: |
@@ -90,34 +150,22 @@ jobs:
             LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=${CROSS_COMPILE} \
             CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
-            ${{ github.event.inputs.defconfig }}
-          make -j"$(nproc)" O=out ARCH=${ARCH} \
-            LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=${CROSS_COMPILE} \
-            CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
             2>&1 | tee build.log
-
       - name: Debug output
         run: |
           echo "===== boot ====="
           find out/arch/arm64/boot -maxdepth 2 -type f
-
           echo "===== search Image ====="
           find out -name "Image*" -print
-
           echo "===== search dtb ====="
           find out -name "*.dtb" -print
-
           echo "===== search Image.gz ====="
           find out -name "*.gz" -print
-
           echo "===== search Image.lz4 ====="
           find out -name "*.lz4" -print
-
       - name: Collect kernel image
         run: |
           mkdir -p dist
-
           if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
             echo "Using Image.gz-dtb"
             cp out/arch/arm64/boot/Image.gz-dtb dist/
@@ -132,10 +180,8 @@ jobs:
             find out -name "Image*" -print
             exit 1
           fi
-
           echo "===== dist ====="
           ls -al dist
-
       - name: Upload raw kernel image artifact
         uses: actions/upload-artifact@v4
         with:
@@ -146,8 +192,7 @@ jobs:
       - name: Fetch AnyKernel3 template
         run: |
           git clone --depth 1 "https://github.com/${{ github.event.inputs.anykernel_repo }}.git" AnyKernel3
-          cp anykernel/anykernel.sh AnyKernel3/anykernel.sh
-
+          cp ci-tools/anykernel/anykernel.sh AnyKernel3/anykernel.sh
       - name: Copy kernel image into AnyKernel3
         run: |
           if [ -f dist/Image.gz-dtb ]; then
@@ -161,18 +206,16 @@ jobs:
             ls -al dist
             exit 1
           fi
-
       - name: Pack AnyKernel3 zip
         working-directory: AnyKernel3
         run: |
-          zip -r9 "../AnyKernel3-chiron-ksu-next-manual-${{ github.run_number }}.zip" \
+          zip -r9 "../AnyKernel3-chiron-${{ github.run_number }}.zip" \
             * -x ".git*" "README.md"
-
       - name: Upload AnyKernel3 flashable zip
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3-chiron-ksu-next-manual-${{ github.run_number }}
-          path: AnyKernel3-chiron-ksu-next-manual-${{ github.run_number }}.zip
+          name: AnyKernel3-chiron-${{ github.run_number }}
+          path: AnyKernel3-chiron-${{ github.run_number }}.zip
           if-no-files-found: error
 
       - name: Upload build log
